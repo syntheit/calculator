@@ -1,26 +1,139 @@
 //! UI layer. Widgets are built in pure Rust (no `.ui` templates) — the app is
 //! small enough that builder-pattern construction stays legible.
 //!
-//! This module currently holds only the stylesheet loader. The keypad, display,
-//! history and memory widgets are added by later work.
+//! [`window`] builds the whole calculator (display + keypads + history) and is
+//! entered from [`crate::app::build_ui`]. This module owns the stylesheet.
+
+pub mod window;
 
 use gtk::gdk;
 
-/// The app stylesheet. Placeholder set of calculator-oriented classes; the UI
-/// work will expand this (key styling, the live-result display, the history
-/// list, etc.). libadwaita named colors (`@accent_color`, `@card_bg_color`, …)
-/// are used so the sheet follows the system light/dark theme.
+/// The app stylesheet. libadwaita *named* colors (`@accent_color`,
+/// `@card_bg_color`, `@window_fg_color`, `@error_color`, …) are used throughout
+/// so every surface follows the system light/dark theme AND the user's accent
+/// color automatically — this is what replaces Google Calculator's fixed
+/// purple/pink palette.
 pub const APP_CSS: &str = "
-/* --- Calculator stylesheet (placeholder — expanded by the UI work) --- */
+/* ─── Display ──────────────────────────────────────────────────────────── */
 
-/* Keypad keys */
-.calc-key { font-size: 1.4em; border-radius: 12px; }
-.calc-key.operator { color: @accent_color; }
-.calc-key.function { font-size: 1.1em; }
+/* The current expression, right-aligned, large. */
+.calc-expression {
+    font-size: 2.6em;
+    font-weight: 300;
+    color: @window_fg_color;
+}
 
-/* The display: the current expression and the live result. Non-editable. */
-.calc-expression { font-size: 2.0em; }
-.calc-result { font-size: 1.3em; opacity: 0.7; }
+/* The live result / (in Result state) the emphasized answer. Accent colored. */
+.calc-result {
+    font-size: 1.5em;
+    font-weight: 400;
+    color: @accent_color;
+}
+
+/* In Result state the two labels swap emphasis: the expression dims and
+   shrinks while the result grows into the primary line. */
+.calc-expression.calc-secondary {
+    font-size: 1.5em;
+    opacity: 0.6;
+}
+.calc-result.calc-primary {
+    font-size: 2.8em;
+    font-weight: 400;
+    color: @window_fg_color;
+}
+
+/* Error state recolors both display lines. */
+.calc-error { color: @error_color; }
+
+/* Small persistent DEG/RAD + M / memory indicators under the header. */
+.calc-indicator {
+    font-size: 0.8em;
+    font-weight: bold;
+    opacity: 0.7;
+    color: @accent_color;
+}
+
+/* ─── Keypad — round basic keys ───────────────────────────────────────── */
+
+.calc-btn {
+    font-size: 1.5em;
+    font-weight: 500;
+    min-width: 62px;
+    min-height: 62px;
+    border-radius: 9999px;   /* circular */
+    padding: 0;
+}
+
+/* Digits & the decimal point: subtle raised neutral. */
+.calc-digit {
+    background-color: alpha(@window_fg_color, 0.06);
+    color: @window_fg_color;
+}
+
+/* Operators ÷ × − + : accent-tinted. */
+.calc-operator {
+    background-color: alpha(@accent_bg_color, 0.15);
+    color: @accent_color;
+    font-weight: 600;
+}
+
+/* AC / clear: a stronger accent highlight (Google's blue AC). */
+.calc-clear {
+    background-color: alpha(@accent_bg_color, 0.28);
+    color: @accent_color;
+    font-weight: 600;
+}
+
+/* ⌫ and the scientific functions: neutral. */
+.calc-function {
+    background-color: alpha(@window_fg_color, 0.08);
+    color: @window_fg_color;
+}
+
+/* = : the filled primary action. */
+.calc-equals {
+    background-color: @accent_bg_color;
+    color: @accent_fg_color;
+    font-weight: 600;
+}
+
+/* An active toggle (Inv on, or the current Deg/Rad mode). */
+.calc-active {
+    background-color: @accent_bg_color;
+    color: @accent_fg_color;
+}
+
+/* ─── Scientific pad — pill/stadium keys (multi-char labels) ───────────── */
+
+.calc-sci {
+    font-size: 1.1em;
+    min-width: 56px;
+    min-height: 46px;
+    border-radius: 9999px;   /* stadium */
+    padding: 0 6px;
+}
+
+/* The chevron handle that reveals the scientific pad. */
+.calc-chevron {
+    min-height: 22px;
+    padding: 0;
+    background: none;
+    box-shadow: none;
+    color: @window_fg_color;
+    opacity: 0.55;
+}
+.calc-chevron:hover { opacity: 0.9; }
+
+/* ─── History rows ────────────────────────────────────────────────────── */
+
+.calc-hist-expr {
+    font-size: 1.0em;
+    opacity: 0.6;
+}
+.calc-hist-result {
+    font-size: 1.5em;
+    color: @window_fg_color;
+}
 ";
 
 /// Install the app stylesheet. Call once at application startup.

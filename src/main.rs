@@ -7,6 +7,10 @@
 //! later work; this file wires up the application shell. See DESIGN.md.
 
 mod app;
+mod engine;
+mod history;
+mod settings;
+mod state;
 mod ui;
 
 use gtk::prelude::*;

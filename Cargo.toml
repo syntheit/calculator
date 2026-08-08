@@ -26,6 +26,9 @@ serde_json = "1"
 # XDG data dir for the history file ($XDG_DATA_HOME/calculator).
 directories = "5"
 
+# Typed engine/state errors (matches Warden's house style).
+thiserror = "2"
+
 # Structured logging.
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
