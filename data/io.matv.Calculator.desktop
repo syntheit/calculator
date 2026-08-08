@@ -1,0 +1,14 @@
+[Desktop Entry]
+Name=Calculator
+GenericName=Calculator
+Comment=A calculator
+Type=Application
+Categories=Utility;Calculator;
+Keywords=calculator;math;arithmetic;scientific;
+Exec=calculator
+Icon=io.matv.Calculator
+Terminal=false
+StartupNotify=true
+DBusActivatable=false
+StartupWMClass=io.matv.Calculator
+X-Purism-FormFactor=Workstation;Mobile;

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="io.matv.Calculator" path="/io/matv/Calculator/">
+    <key name="window-width" type="i">
+      <default>380</default>
+      <summary>Main window width</summary>
+    </key>
+    <key name="window-height" type="i">
+      <default>780</default>
+      <summary>Main window height</summary>
+    </key>
+    <key name="window-maximized" type="b">
+      <default>false</default>
+      <summary>Whether the main window is maximized</summary>
+    </key>
+    <key name="angle-mode" type="s">
+      <choices>
+        <choice value="rad"/>
+        <choice value="deg"/>
+      </choices>
+      <default>"rad"</default>
+      <summary>Angle mode for trigonometric functions (radians or degrees)</summary>
+    </key>
+  </schema>
+</schemalist>

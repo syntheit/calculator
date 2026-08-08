@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.matv.Calculator</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+
+  <name>Calculator</name>
+  <summary>A mobile-first calculator</summary>
+
+  <description>
+    <p>
+      Calculator is a native GTK4/libadwaita calculator in the style of Google
+      Calculator. It is designed mobile-first for GNOME Shell Mobile and adapts
+      cleanly to the desktop.
+    </p>
+    <p>Features:</p>
+    <ul>
+      <li>Basic arithmetic</li>
+      <li>Scientific functions</li>
+      <li>Live results as you type</li>
+      <li>Calculation history</li>
+      <li>Memory (MS, MR, M+, M−)</li>
+    </ul>
+  </description>
+
+  <launchable type="desktop-id">io.matv.Calculator.desktop</launchable>
+
+  <url type="homepage">https://github.com/syntheit/calculator</url>
+  <url type="bugtracker">https://github.com/syntheit/calculator/issues</url>
+  <url type="vcs-browser">https://github.com/syntheit/calculator</url>
+
+  <developer id="io.matv">
+    <name>Daniel Miller</name>
+  </developer>
+
+  <content_rating type="oars-1.1" />
+
+  <categories>
+    <category>Utility</category>
+  </categories>
+
+  <requires>
+    <display_length compare="ge">360</display_length>
+  </requires>
+  <recommends>
+    <control>keyboard</control>
+    <control>pointing</control>
+    <control>touch</control>
+  </recommends>
+
+  <releases>
+    <release version="0.1.0" date="2026-08-08">
+      <description>
+        <p>Initial release.</p>
+      </description>
+    </release>
+  </releases>
+</component>
