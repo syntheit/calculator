@@ -68,7 +68,6 @@ impl Ui {
                 self.expr_label.add_css_class("calc-error");
                 let msg = calc.error_message().unwrap_or_default();
                 self.result_label.set_text(&msg);
-                self.result_label.set_visible(true);
                 self.result_label.add_css_class("calc-primary");
                 self.result_label.add_css_class("calc-error");
             }
@@ -81,10 +80,9 @@ impl Ui {
                 }) {
                     Some(r) => {
                         self.result_label.set_text(&r);
-                        self.result_label.set_visible(true);
                         self.result_label.add_css_class("calc-primary");
                     }
-                    None => self.result_label.set_visible(false),
+                    None => self.result_label.set_text(""),
                 }
             }
             CalcState::Input => {
@@ -92,9 +90,8 @@ impl Ui {
                 match calc.live_result() {
                     Some(r) => {
                         self.result_label.set_text(&r);
-                        self.result_label.set_visible(true);
                     }
-                    None => self.result_label.set_visible(false),
+                    None => self.result_label.set_text(""),
                 }
             }
         }
@@ -148,7 +145,7 @@ impl Ui {
     fn copy_result(&self) {
         let text = {
             let calc = self.calc.borrow();
-            if !self.result_label.text().is_empty() && self.result_label.is_visible() {
+            if !self.result_label.text().is_empty() {
                 self.result_label.text().to_string()
             } else if let Some(v) = calc.current_value() {
                 crate::engine::format_result(v)
@@ -218,7 +215,6 @@ pub fn build_ui(app: &adw::Application) {
         .wrap(false)
         .single_line_mode(true)
         .ellipsize(gtk::pango::EllipsizeMode::Start)
-        .visible(false)
         .build();
     result_label.set_selectable(false);
 
@@ -348,6 +344,8 @@ pub fn build_ui(app: &adw::Application) {
         .margin_start(12)
         .margin_end(12)
         .margin_bottom(16)
+        .vexpand(false)
+        .valign(gtk::Align::End)
         .build();
     keypad.append(&sci_revealer);
     keypad.append(&basic_grid);
@@ -356,6 +354,8 @@ pub fn build_ui(app: &adw::Application) {
     let keypad_clamp = adw::Clamp::builder()
         .maximum_size(440)
         .child(&keypad)
+        .vexpand(false)
+        .valign(gtk::Align::End)
         .build();
 
     // ── Body: display (top), chevron, keypad (bottom) ────────────────────
@@ -405,7 +405,7 @@ fn key_button(label: &str, class: &str, ui: &Ui, on_press: impl Fn(&mut Calculat
         .label(label)
         .css_classes(["calc-btn", class])
         .hexpand(true)
-        .vexpand(true)
+        .vexpand(false)
         .can_focus(false) // never steal focus from the window key controller
         .build();
     btn.connect_clicked(clone!(
@@ -425,7 +425,7 @@ fn sci_button(label: &str) -> gtk::Button {
         .label(label)
         .css_classes(["calc-sci", "calc-function"])
         .hexpand(true)
-        .vexpand(true)
+        .vexpand(false)
         .can_focus(false)
         .build()
 }
@@ -485,7 +485,7 @@ fn build_basic_pad(ui: &Ui, _app: &adw::Application, _window: &adw::ApplicationW
         .icon_name("edit-clear-symbolic")
         .css_classes(["calc-btn", "calc-function"])
         .hexpand(true)
-        .vexpand(true)
+        .vexpand(false)
         .can_focus(false)
         .build();
     back.connect_clicked(clone!(
@@ -503,7 +503,7 @@ fn build_basic_pad(ui: &Ui, _app: &adw::Application, _window: &adw::ApplicationW
         .label("=")
         .css_classes(["calc-btn", "calc-equals"])
         .hexpand(true)
-        .vexpand(true)
+        .vexpand(false)
         .can_focus(false)
         .build();
     equals.connect_clicked(clone!(
