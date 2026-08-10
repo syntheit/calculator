@@ -152,14 +152,15 @@ impl Ui {
             b.set_label(if inv { "x\u{00B2}" } else { "\u{221A}" });
         }
 
-        // Deg/Rad button: show the CURRENT mode; mark active always (it's a
-        // persistent mode indicator, like Google's).
+        // Deg/Rad button: show the CURRENT mode. It's a normal gray
+        // scientific button — the mode is communicated by its label ("Deg" /
+        // "Rad") and the DEG/RAD display indicator, not by an accent highlight.
         for b in self.deg_button.iter() {
             b.set_label(match angle {
                 AngleUnit::Deg => "Deg",
                 AngleUnit::Rad => "Rad",
             });
-            b.add_css_class("calc-active");
+            b.remove_css_class("calc-active");
         }
     }
 
@@ -325,9 +326,19 @@ pub fn build_ui(app: &adw::Application) {
     ));
     header.pack_start(&history_btn);
 
+    let converter_btn = gtk::Button::builder()
+        .icon_name("object-flip-vertical-symbolic")
+        .tooltip_text("Unit converter")
+        .build();
+    converter_btn.connect_clicked(clone!(
+        #[weak]
+        ui,
+        move |_| show_converter(&ui)
+    ));
+    header.pack_start(&converter_btn);
+
     // Kebab menu (Copy / Clear history / About), backed by a gio::Menu model.
     let menu_model = gio::Menu::new();
-    menu_model.append(Some("Unit converter"), Some("calc.converter"));
     menu_model.append(Some("Copy result"), Some("calc.copy"));
     menu_model.append(Some("Clear history"), Some("calc.clear-history"));
     menu_model.append(Some("About Calculator"), Some("calc.about"));
