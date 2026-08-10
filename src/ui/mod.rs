@@ -154,6 +154,27 @@ pub const APP_CSS: &str = "
     color: @error_fg_color;
     border-radius: 12px;
 }
+
+/* ─── Landscape overrides ─────────────────────────────────────────────── */
+
+/* Landscape display: a compact top strip, not the tall portrait block. */
+.calc-display.landscape {
+    margin-top: 2px;
+    margin-bottom: 2px;
+}
+
+/* Landscape keypad buttons shrink so all 5 rows fit the short height. The
+   portrait keypad keeps its fixed 62/46px min-heights (separate instances). */
+.calc-btn-land {
+    min-height: 0;
+    min-width: 0;
+    font-size: 1.25em;
+}
+.calc-sci-land {
+    min-height: 0;
+    min-width: 0;
+    font-size: 1.0em;
+}
 ";
 
 /// Install the app stylesheet. Call once at application startup.

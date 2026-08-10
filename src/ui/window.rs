@@ -341,6 +341,7 @@ pub fn build_ui(app: &adw::Application) {
     // ── Display box ──────────────────────────────────────────────────────
     let display = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
+        .css_classes(["calc-display"])
         .spacing(4)
         .margin_start(20)
         .margin_end(20)
@@ -414,6 +415,21 @@ pub fn build_ui(app: &adw::Application) {
     let basic_portrait = build_basic_pad(&ui, app, &window);
     let basic_landscape = build_basic_pad(&ui, app, &window);
 
+    // Landscape basic pad: give every button a shrink-friendly class + let them
+    // fill the row height. (Portrait's basic pad is a separate instance, so this
+    // never touches the portrait keypad's fixed-height stability.)
+    basic_landscape.set_vexpand(true);
+    {
+        let mut child = basic_landscape.first_child();
+        while let Some(w) = child {
+            if let Some(b) = w.downcast_ref::<gtk::Button>() {
+                b.add_css_class("calc-btn-land");
+                b.set_vexpand(true);
+            }
+            child = w.next_sibling();
+        }
+    }
+
     // The portrait scientific pad lives behind the chevron revealer.
     sci_revealer.set_child(Some(&sci_grid_portrait));
 
@@ -460,6 +476,8 @@ pub fn build_ui(app: &adw::Application) {
     landscape_page.append(&basic_landscape);
 
     let keypad_stack = gtk::Stack::new();
+    keypad_stack.set_hhomogeneous(false);
+    keypad_stack.set_vhomogeneous(false);
     keypad_stack.add_named(&portrait_page, Some("portrait"));
     keypad_stack.add_named(&landscape_page, Some("landscape"));
     keypad_stack.set_visible_child_name("portrait");
@@ -467,7 +485,7 @@ pub fn build_ui(app: &adw::Application) {
     // Keep the keypad width-bounded on desktop. Raised from 440 → 760 so the
     // wider landscape (sci + basic side by side) isn't cramped.
     let keypad_clamp = adw::Clamp::builder()
-        .maximum_size(760)
+        .maximum_size(960)
         .child(&keypad_stack)
         .vexpand(false)
         .valign(gtk::Align::End)
@@ -509,6 +527,20 @@ pub fn build_ui(app: &adw::Application) {
             adw::BreakpointConditionRatioType::MinAspectRatio, 1, 1));
     let bp_landscape = adw::Breakpoint::new(cond);
     bp_landscape.add_setter(&keypad_stack, "visible-child-name", Some(&"landscape".to_value()));
+    // Landscape: shrink the shared display to a compact top strip and let the
+    // keypad take the freed vertical space. valign is flipped to Fill so the
+    // vexpanding, row-homogeneous grids stretch to divide the height evenly
+    // (End/Center would keep them short at natural height). GTK restores the
+    // pre-apply values (display vexpand=true/valign=Center, keypad_stack
+    // vexpand=false, keypad_clamp vexpand=false/valign=End, landscape_page
+    // valign=End) on unapply, so portrait is unchanged.
+    bp_landscape.add_setter(&display, "vexpand", Some(&false.to_value()));
+    bp_landscape.add_setter(&display, "valign", Some(&gtk::Align::Start.to_value()));
+    bp_landscape.add_setter(&keypad_stack, "vexpand", Some(&true.to_value()));
+    bp_landscape.add_setter(&keypad_clamp, "vexpand", Some(&true.to_value()));
+    bp_landscape.add_setter(&keypad_clamp, "valign", Some(&gtk::Align::Fill.to_value()));
+    bp_landscape.add_setter(&landscape_page, "valign", Some(&gtk::Align::Fill.to_value()));
+    bp_landscape.add_setter(&landscape_page, "vexpand", Some(&true.to_value()));
     window.add_breakpoint(bp_landscape);
 
     // ── Kebab actions ────────────────────────────────────────────────────
@@ -783,17 +815,32 @@ fn build_scientific_pad_landscape(ui: &Ui, s: &SciButtons) -> gtk::Grid {
         .row_homogeneous(true)
         .column_homogeneous(true)
         .hexpand(true)
+        .vexpand(true)
         .build();
 
     // Stateless, page-local buttons.
     let pi = sci_button("\u{03C0}");
     wire_sci(&pi, ui, |c| c.press_pi());
+    pi.add_css_class("calc-sci-land");
+    pi.set_vexpand(true);
     let pow = sci_button("^");
     wire_sci(&pow, ui, |c| c.press_power());
+    pow.add_css_class("calc-sci-land");
+    pow.set_vexpand(true);
     let fact = sci_button("!");
     wire_sci(&fact, ui, |c| c.press_factorial());
+    fact.add_css_class("calc-sci-land");
+    fact.set_vexpand(true);
     let euler = sci_button("e");
     wire_sci(&euler, ui, |c| c.press_e());
+    euler.add_css_class("calc-sci-land");
+    euler.set_vexpand(true);
+
+    // Landscape sci buttons: shrink class + fill row height.
+    for b in [&s.inv, &s.deg, &s.sqrt, &s.sin, &s.ln, &s.cos, &s.log, &s.tan] {
+        b.add_css_class("calc-sci-land");
+        b.set_vexpand(true);
+    }
 
     // Row 0: Inv Deg √
     grid.attach(&s.inv, 0, 0, 1, 1);
