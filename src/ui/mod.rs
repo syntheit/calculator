@@ -162,6 +162,14 @@ pub const APP_CSS: &str = "
     margin-top: 2px;
     margin-bottom: 2px;
 }
+/* Landscape: compact display fonts so the indicator + expression + result
+   fit in the fixed 110px display strip and the Input->Result emphasis swap
+   never exceeds it (keeps the vexpanding keypad's height constant). */
+.calc-display.landscape .calc-expression { font-size: 1.6em; }
+.calc-display.landscape .calc-expression.calc-secondary { font-size: 1.1em; }
+.calc-display.landscape .calc-result { font-size: 1.1em; }
+.calc-display.landscape .calc-result.calc-primary { font-size: 1.6em; }
+.calc-display.landscape .calc-indicator { font-size: 0.75em; }
 
 /* Landscape keypad buttons shrink so all 5 rows fit the short height. The
    portrait keypad keeps its fixed 62/46px min-heights (separate instances). */

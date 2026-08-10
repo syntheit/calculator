@@ -536,11 +536,14 @@ pub fn build_ui(app: &adw::Application) {
     // valign=End) on unapply, so portrait is unchanged.
     bp_landscape.add_setter(&display, "vexpand", Some(&false.to_value()));
     bp_landscape.add_setter(&display, "valign", Some(&gtk::Align::Start.to_value()));
+    bp_landscape.add_setter(&display, "height-request", Some(&110i32.to_value()));
+    bp_landscape.add_setter(&display, "css-classes", Some(&vec!["calc-display", "landscape"].to_value()));
     bp_landscape.add_setter(&keypad_stack, "vexpand", Some(&true.to_value()));
     bp_landscape.add_setter(&keypad_clamp, "vexpand", Some(&true.to_value()));
     bp_landscape.add_setter(&keypad_clamp, "valign", Some(&gtk::Align::Fill.to_value()));
     bp_landscape.add_setter(&landscape_page, "valign", Some(&gtk::Align::Fill.to_value()));
     bp_landscape.add_setter(&landscape_page, "vexpand", Some(&true.to_value()));
+    bp_landscape.add_setter(&landscape_page, "margin-bottom", Some(&24i32.to_value()));
     window.add_breakpoint(bp_landscape);
 
     // ── Kebab actions ────────────────────────────────────────────────────
