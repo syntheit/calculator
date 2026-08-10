@@ -21,5 +21,13 @@
       <default>"rad"</default>
       <summary>Angle mode for trigonometric functions (radians or degrees)</summary>
     </key>
+    <key name="inverse-mode" type="b">
+      <default>false</default>
+      <summary>Whether scientific inverse (2nd-function) mode is active</summary>
+    </key>
+    <key name="converter-category" type="s">
+      <default>"length"</default>
+      <summary>Last-used unit-converter category (lowercase category name)</summary>
+    </key>
   </schema>
 </schemalist>

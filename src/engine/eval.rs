@@ -270,7 +270,7 @@ mod tests {
 
     #[test]
     fn implicit_two_pi() {
-        assert!(close(ok("2\u{03C0}"), 6.283185307179586));
+        assert!(close(ok("2\u{03C0}"), std::f64::consts::TAU));
     }
 
     #[test]

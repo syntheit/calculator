@@ -16,6 +16,8 @@ const KEY_WIDTH: &str = "window-width";
 const KEY_HEIGHT: &str = "window-height";
 const KEY_MAXIMIZED: &str = "window-maximized";
 const KEY_ANGLE: &str = "angle-mode";
+const KEY_INVERSE: &str = "inverse-mode";
+const KEY_CONVERTER_CATEGORY: &str = "converter-category";
 
 /// Open the settings store, or `None` when the schema isn't installed.
 ///
@@ -78,5 +80,37 @@ pub fn set_angle_mode(angle: AngleUnit) {
             AngleUnit::Rad => "rad",
         };
         let _ = s.set_string(KEY_ANGLE, value);
+    }
+}
+
+/// The saved scientific inverse-mode flag, defaulting to off.
+pub fn inverse_mode() -> bool {
+    settings().map(|s| s.boolean(KEY_INVERSE)).unwrap_or(false)
+}
+
+/// Persist the scientific inverse-mode flag (best-effort).
+pub fn set_inverse_mode(v: bool) {
+    if let Some(s) = settings() {
+        let _ = s.set_boolean(KEY_INVERSE, v);
+    }
+}
+
+/// The saved unit-converter category, defaulting to Length.
+pub fn converter_category() -> crate::convert::Category {
+    use crate::convert::Category;
+    let raw = settings()
+        .map(|s| s.string(KEY_CONVERTER_CATEGORY).to_string())
+        .unwrap_or_else(|| "length".to_string());
+    Category::all()
+        .iter()
+        .copied()
+        .find(|c| c.name().to_lowercase() == raw)
+        .unwrap_or(Category::Length)
+}
+
+/// Persist the unit-converter category (best-effort).
+pub fn set_converter_category(cat: crate::convert::Category) {
+    if let Some(s) = settings() {
+        let _ = s.set_string(KEY_CONVERTER_CATEGORY, &cat.name().to_lowercase());
     }
 }

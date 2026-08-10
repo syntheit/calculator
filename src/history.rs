@@ -102,6 +102,14 @@ impl History {
         self.entries.clear();
     }
 
+    /// Remove the entry at `index` (no-op if out of bounds). The caller is
+    /// responsible for calling [`save`](Self::save) afterward to persist.
+    pub fn remove(&mut self, index: usize) {
+        if index < self.entries.len() {
+            self.entries.remove(index);
+        }
+    }
+
     /// The entries, oldest first.
     pub fn entries(&self) -> &[HistoryEntry] {
         &self.entries
@@ -222,6 +230,21 @@ mod tests {
         assert!(!h.is_empty());
         h.clear();
         assert!(h.is_empty());
+    }
+
+    #[test]
+    fn remove_by_index() {
+        let mut h = History::default();
+        h.push(HistoryEntry::new("a", "1"));
+        h.push(HistoryEntry::new("b", "2"));
+        h.push(HistoryEntry::new("c", "3"));
+        h.remove(1);
+        assert_eq!(h.entries().len(), 2);
+        assert_eq!(h.entries()[0].expression, "a");
+        assert_eq!(h.entries()[1].expression, "c");
+        // Out-of-bounds is a no-op (no panic).
+        h.remove(99);
+        assert_eq!(h.entries().len(), 2);
     }
 
     #[test]

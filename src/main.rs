@@ -7,6 +7,7 @@
 //! later work; this file wires up the application shell. See DESIGN.md.
 
 mod app;
+mod convert;
 mod engine;
 mod history;
 mod settings;

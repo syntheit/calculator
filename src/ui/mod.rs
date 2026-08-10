@@ -9,7 +9,7 @@ pub mod window;
 use gtk::gdk;
 
 /// The app stylesheet. libadwaita *named* colors (`@accent_color`,
-/// `@card_bg_color`, `@window_fg_color`, `@error_color`, …) are used throughout
+/// `@window_fg_color`, `@error_color`, …) are used throughout
 /// so every surface follows the system light/dark theme AND the user's accent
 /// color automatically — this is what replaces Google Calculator's fixed
 /// purple/pink palette.
@@ -62,6 +62,14 @@ pub const APP_CSS: &str = "
     min-height: 62px;
     border-radius: 9999px;   /* circular */
     padding: 0;
+    transition: background-color 100ms ease, box-shadow 100ms ease, filter 100ms ease;
+}
+
+/* Pressed-key feedback (Google-Calculator style). NOTE: :active is the
+   PRESSED pseudo-class — distinct from the .calc-active toggle CLASS. */
+.calc-btn:active {
+    box-shadow: inset 0 0 0 100px alpha(@window_fg_color, 0.12);
+    filter: brightness(0.94);
 }
 
 /* Digits & the decimal point: subtle raised neutral. */
@@ -111,6 +119,13 @@ pub const APP_CSS: &str = "
     min-height: 46px;
     border-radius: 9999px;   /* stadium */
     padding: 0 6px;
+    transition: background-color 100ms ease, box-shadow 100ms ease, filter 100ms ease;
+}
+
+/* Pressed-key feedback for the pill scientific keys. */
+.calc-sci:active {
+    box-shadow: inset 0 0 0 100px alpha(@window_fg_color, 0.12);
+    filter: brightness(0.94);
 }
 
 /* The chevron handle that reveals the scientific pad. */
@@ -133,6 +148,11 @@ pub const APP_CSS: &str = "
 .calc-hist-result {
     font-size: 1.5em;
     color: @window_fg_color;
+}
+.calc-hist-delete {
+    background-color: @error_bg_color;
+    color: @error_fg_color;
+    border-radius: 12px;
 }
 ";
 

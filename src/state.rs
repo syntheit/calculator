@@ -515,6 +515,11 @@ impl Calculator {
         self.inv = !self.inv;
     }
 
+    /// Set the scientific inverse (2nd-function) mode directly.
+    pub fn set_inv(&mut self, v: bool) {
+        self.inv = v;
+    }
+
     /// Whether inverse mode is on.
     pub fn inv(&self) -> bool {
         self.inv
@@ -933,6 +938,15 @@ mod tests {
         calc.press_digit('1');
         // asin(1) with auto-close in Deg = 90.
         assert_eq!(calc.live_result(), Some("90".to_string()));
+    }
+
+    #[test]
+    fn set_inv_sets_flag() {
+        let mut calc = c();
+        calc.set_inv(true);
+        assert!(calc.inv());
+        calc.set_inv(false);
+        assert!(!calc.inv());
     }
 
     #[test]
