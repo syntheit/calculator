@@ -87,6 +87,11 @@ pub struct Ui {
     prog_signed_btn: gtk::ToggleButton,
     /// The programmer-mode expression / error line.
     prog_expr_label: gtk::Label,
+    /// The last calculator-family mode ("calculator" or "programmer") we were
+    /// in before entering the converter, so the Convert toggle can return there.
+    last_calc_mode: Rc<RefCell<String>>,
+    /// The header Convert toggle button (active iff the converter page shows).
+    convert_btn: gtk::ToggleButton,
 }
 
 impl Ui {
@@ -466,6 +471,11 @@ pub fn build_ui(app: &adw::Application) {
         .icon_name("document-open-recent-symbolic")
         .tooltip_text("History")
         .build();
+    let convert_btn = gtk::ToggleButton::builder()
+        .icon_name("object-flip-vertical-symbolic")
+        .tooltip_text("Unit converter")
+        .css_classes(["flat"])
+        .build();
     let mode_action = gio::SimpleAction::new_stateful(
         "mode",
         Some(glib::VariantTy::STRING),
@@ -641,6 +651,8 @@ pub fn build_ui(app: &adw::Application) {
         prog_width_btns: Rc::new(prog_width_btns_v.clone()),
         prog_signed_btn: prog_signed_btn.clone(),
         prog_expr_label: prog_expr_label.clone(),
+        last_calc_mode: Rc::new(RefCell::new(String::from("calculator"))),
+        convert_btn: convert_btn.clone(),
     };
 
     // Wire both stateful button sets (each set wired exactly once — no widget
@@ -674,6 +686,43 @@ pub fn build_ui(app: &adw::Application) {
         move |_| show_history(&ui)
     ));
     header.pack_start(&history_btn);
+    header.pack_start(&convert_btn);
+
+    // The header Convert toggle drives the "converter" mode directly (it is not
+    // part of the hamburger radio menu). It is a TOGGLE with a re-entrancy guard:
+    // switch_mode also syncs this button's active state, which re-fires
+    // `toggled`, so we only act when the button's state and the visible page
+    // actually disagree.
+    convert_btn.connect_toggled(clone!(
+        #[weak]
+        ui,
+        #[upgrade_or_default]
+        move |btn| {
+            let in_converter =
+                ui.content_stack.visible_child_name().as_deref() == Some("converter");
+            if btn.is_active() == in_converter {
+                return; // already in sync — this toggle was programmatic
+            }
+            if btn.is_active() {
+                // Entering converter: remember where we came from, then switch.
+                let current = ui
+                    .content_stack
+                    .visible_child_name()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "calculator".to_string());
+                if current != "converter" {
+                    *ui.last_calc_mode.borrow_mut() = current;
+                }
+                ui.mode_action.set_state(&"converter".to_variant());
+                switch_mode(&ui, "converter");
+            } else {
+                // Leaving converter: return to the last calculator-family mode.
+                let back = ui.last_calc_mode.borrow().clone();
+                ui.mode_action.set_state(&back.to_variant());
+                switch_mode(&ui, &back);
+            }
+        }
+    ));
 
     // Kebab menu (Mode / Copy / Clear history / Preferences / About), backed by
     // a sectioned gio::Menu model.
@@ -681,8 +730,10 @@ pub fn build_ui(app: &adw::Application) {
 
     let mode_section = gio::Menu::new();
     mode_section.append(Some("Calculator"), Some("calc.mode::calculator"));
-    mode_section.append(Some("Convert"), Some("calc.mode::converter"));
     mode_section.append(Some("Programmer"), Some("calc.mode::programmer"));
+    // Convert lives in a dedicated header toggle button, not this radio menu.
+    // Future calculator-family modes (e.g. "Financial") go here, one line each:
+    //   mode_section.append(Some("Financial"), Some("calc.mode::financial"));
     menu_model.append_section(Some("Mode"), &mode_section);
 
     let ops_section = gio::Menu::new();
@@ -936,6 +987,11 @@ pub fn build_ui(app: &adw::Application) {
     ui.render_prog();
     // Restore the saved top-level mode (stack child, title, history-btn
     // visibility, radio state, and a re-render of the active page).
+    // Seed the Convert-toggle return target from persistence FIRST, so if the
+    // restored mode is "converter", toggling Convert off returns to the calc
+    // family mode we were last in (switch_mode only overwrites this when
+    // entering "calculator"/"programmer", never "converter").
+    *ui.last_calc_mode.borrow_mut() = settings::last_calc_mode();
     let saved_mode = settings::active_mode();
     let saved_mode = match saved_mode.as_str() {
         "converter" => "converter",
@@ -1396,6 +1452,23 @@ fn switch_mode(ui: &Ui, mode: &str) {
     ui.window_title.set_title(title);
     // History is a calculator-mode concept; hide the button elsewhere.
     ui.history_btn.set_visible(mode == "calculator");
+    // Keep the header Convert toggle in sync no matter which path switched
+    // the mode (hamburger radio, startup restore, or the toggle itself).
+    // Guard against re-entrancy: only mutate if the state actually differs,
+    // so we don't recurse through the `toggled` handler. Since
+    // set_visible_child_name(mode) already ran above, the toggled handler's
+    // guard sees agreement and early-returns.
+    let want_active = mode == "converter";
+    if ui.convert_btn.is_active() != want_active {
+        ui.convert_btn.set_active(want_active);
+    }
+    // When we switch INTO a calculator-family mode, remember it as the
+    // return target for the Convert toggle — in memory and persisted so the
+    // toggle restores the right mode across a restart.
+    if mode == "calculator" || mode == "programmer" {
+        *ui.last_calc_mode.borrow_mut() = mode.to_string();
+        settings::set_last_calc_mode(mode);
+    }
     settings::set_active_mode(mode);
     match mode {
         "converter" => {

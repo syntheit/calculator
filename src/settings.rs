@@ -25,6 +25,7 @@ const KEY_ACTIVE_MODE: &str = "active-mode";
 const KEY_PROG_BASE: &str = "prog-base";
 const KEY_PROG_BIT_WIDTH: &str = "prog-bit-width";
 const KEY_PROG_SIGNED: &str = "prog-signed";
+const KEY_LAST_CALC_MODE: &str = "last-calc-mode";
 
 /// Open the settings store, or `None` when the schema isn't installed.
 ///
@@ -156,6 +157,21 @@ pub fn active_mode() -> String {
 pub fn set_active_mode(mode: &str) {
     if let Some(s) = settings() {
         let _ = s.set_string(KEY_ACTIVE_MODE, mode);
+    }
+}
+
+/// The saved calculator-family mode to return to when leaving the
+/// converter, defaulting to "calculator".
+pub fn last_calc_mode() -> String {
+    settings()
+        .map(|s| s.string(KEY_LAST_CALC_MODE).to_string())
+        .unwrap_or_else(|| "calculator".to_string())
+}
+
+/// Persist the calculator-family return mode (best-effort).
+pub fn set_last_calc_mode(mode: &str) {
+    if let Some(s) = settings() {
+        let _ = s.set_string(KEY_LAST_CALC_MODE, mode);
     }
 }
 

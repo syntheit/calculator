@@ -64,5 +64,13 @@
       <default>true</default>
       <summary>Whether programmer mode interprets values as signed</summary>
     </key>
+    <key name="last-calc-mode" type="s">
+      <choices>
+        <choice value="calculator"/>
+        <choice value="programmer"/>
+      </choices>
+      <default>"calculator"</default>
+      <summary>The calculator-family mode to return to when leaving the converter</summary>
+    </key>
   </schema>
 </schemalist>
