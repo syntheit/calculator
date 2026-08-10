@@ -29,5 +29,40 @@
       <default>"length"</default>
       <summary>Last-used unit-converter category (lowercase category name)</summary>
     </key>
+    <key name="number-format" type="s">
+      <choices>
+        <choice value="en-us"/>
+        <choice value="es-ar"/>
+      </choices>
+      <default>"en-us"</default>
+      <summary>Number format locale for display grouping and decimal separators</summary>
+    </key>
+    <key name="active-mode" type="s">
+      <choices>
+        <choice value="calculator"/>
+        <choice value="converter"/>
+        <choice value="programmer"/>
+      </choices>
+      <default>"calculator"</default>
+      <summary>The active top-level mode (calculator or converter)</summary>
+    </key>
+    <key name="prog-base" type="s">
+      <choices>
+        <choice value="hex"/>
+        <choice value="dec"/>
+        <choice value="oct"/>
+        <choice value="bin"/>
+      </choices>
+      <default>"dec"</default>
+      <summary>Programmer-mode numeric base</summary>
+    </key>
+    <key name="prog-bit-width" type="i">
+      <default>32</default>
+      <summary>Programmer-mode bit width (8, 16, 32 or 64)</summary>
+    </key>
+    <key name="prog-signed" type="b">
+      <default>true</default>
+      <summary>Whether programmer mode interprets values as signed</summary>
+    </key>
   </schema>
 </schemalist>

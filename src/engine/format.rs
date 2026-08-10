@@ -22,6 +22,33 @@ pub const GROUP_SEPARATOR: char = ',';
 /// The decimal separator (en-US default).
 pub const DECIMAL_SEPARATOR: char = '.';
 
+/// Locale governing the group + decimal separators used when rendering.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NumLocale {
+    /// en-US: thousands group ",", decimal ".".
+    EnUs,
+    /// es-AR (Argentina): thousands group ".", decimal ",".
+    EsAr,
+}
+
+impl NumLocale {
+    /// The thousands-group separator for this locale.
+    pub fn group(self) -> char {
+        match self {
+            NumLocale::EnUs => ',',
+            NumLocale::EsAr => '.',
+        }
+    }
+
+    /// The decimal separator for this locale.
+    pub fn decimal(self) -> char {
+        match self {
+            NumLocale::EnUs => '.',
+            NumLocale::EsAr => ',',
+        }
+    }
+}
+
 /// Significant figures we keep before formatting. 12 is enough to hide f64
 /// identity artifacts while staying well inside f64's ~15–17 digit budget.
 const SIG_FIGS: i32 = 12;
@@ -29,6 +56,14 @@ const SIG_FIGS: i32 = 12;
 /// Format `value` for the calculator display using en-US defaults.
 pub fn format_result(value: f64) -> String {
     format_with(value, GROUP_SEPARATOR, DECIMAL_SEPARATOR)
+}
+
+/// Format `value` for display using the given locale's separators. Delegates to
+/// the shared `format_with` so grouping, trailing-zero trim, E-notation and the
+/// non-terminating ellipsis all behave identically across locales — only the
+/// group + decimal glyphs differ.
+pub fn format_result_locale(value: f64, locale: NumLocale) -> String {
+    format_with(value, locale.group(), locale.decimal())
 }
 
 /// Format with explicit separators (for locale experiments / tests).
@@ -258,4 +293,36 @@ mod tests {
         assert_eq!(format_result(0.5), "0.5");
         assert_eq!(format_result(0.25), "0.25");
     }
+
+    #[test]
+    fn es_ar_formatting() {
+        assert_eq!(format_result_locale(2025.0, NumLocale::EsAr), "2.025");
+        assert_eq!(format_result_locale(2.5, NumLocale::EsAr), "2,5");
+        assert_eq!(format_result_locale(1_000_000.0, NumLocale::EsAr), "1.000.000");
+        assert_eq!(format_result_locale(1234.5, NumLocale::EsAr), "1.234,5");
+    }
+
+    #[test]
+    fn en_us_formatting() {
+        assert_eq!(format_result_locale(2025.0, NumLocale::EnUs), "2,025");
+        assert_eq!(format_result_locale(2.5, NumLocale::EnUs), "2.5");
+    }
+
+    #[test]
+    fn locale_scientific_and_ellipsis() {
+        assert_eq!(format_result_locale(1.23e18, NumLocale::EsAr), "1,23E18");
+        assert_eq!(format_result_locale(1.23e18, NumLocale::EnUs), "1.23E18");
+        let s = format_result_locale(1.0 / 3.0, NumLocale::EsAr);
+        assert!(s.starts_with("0,3333"), "got {s}");
+        assert!(s.ends_with('\u{2026}'), "got {s}");
+    }
+
+    #[test]
+    fn locale_accessors() {
+        assert_eq!(NumLocale::EnUs.group(), ',');
+        assert_eq!(NumLocale::EnUs.decimal(), '.');
+        assert_eq!(NumLocale::EsAr.group(), '.');
+        assert_eq!(NumLocale::EsAr.decimal(), ',');
+    }
 }
+

@@ -17,7 +17,9 @@ use gtk::glib::clone;
 use gtk::{gdk, gio};
 
 use crate::engine::AngleUnit;
+use crate::engine::format::NumLocale;
 use crate::history::{self, History};
+use crate::programmer::{Base, Width};
 use crate::settings;
 use crate::state::{CalcState, Calculator, Func, Op};
 
@@ -47,18 +49,56 @@ pub struct Ui {
     sci_ln: Rc<Vec<gtk::Button>>,
     sci_log: Rc<Vec<gtk::Button>>,
     sci_sqrt: Rc<Vec<gtk::Button>>,
+    sci_sinh: Rc<Vec<gtk::Button>>,
+    sci_cosh: Rc<Vec<gtk::Button>>,
+    sci_tanh: Rc<Vec<gtk::Button>>,
     /// The AdwNavigationView the history page is pushed onto.
     nav: adw::NavigationView,
     /// Converter page state (category + selected unit indices + input string).
     /// A plain Rc<RefCell<>> holder, entirely separate from the Calculator
     /// state machine. Reset each time the converter page is opened.
     converter: Rc<RefCell<ConverterState>>,
+    /// The mode container: swaps calculator ⇄ converter pages.
+    content_stack: adw::ViewStack,
+    /// The header center title (retitled on mode switch).
+    window_title: adw::WindowTitle,
+    /// The stateful "mode" radio action (state set on startup restore).
+    mode_action: gio::SimpleAction,
+    /// The header History button (calculator-mode only; hidden elsewhere).
+    history_btn: gtk::Button,
+    /// The converter's top (input echo) display label — shared so a locale
+    /// change can refresh the converter without rebuilding its page.
+    conv_top_label: gtk::Label,
+    /// The converter's bottom (result) display label — shared, see above.
+    conv_bottom_label: gtk::Label,
+    /// Programmer-mode state machine (base/width/signed + expression buffer).
+    prog: Rc<RefCell<crate::prog_state::ProgState>>,
+    /// The 4 base-row flat buttons, in fixed order [Hex, Dec, Oct, Bin].
+    prog_rows: Rc<Vec<gtk::Button>>,
+    /// The right-hand value label of each base row, same [Hex,Dec,Oct,Bin] order.
+    prog_row_values: Rc<Vec<gtk::Label>>,
+    /// The A–F hex-digit keypad buttons (A,B,C,D,E,F), toggled by base.
+    prog_hex_btns: Rc<Vec<gtk::Button>>,
+    /// The 0–9 digit keypad buttons, index == digit value, toggled by base.
+    prog_digit_btns: Rc<Vec<gtk::Button>>,
+    /// The 4 linked width toggle buttons [W8,W16,W32,W64].
+    prog_width_btns: Rc<Vec<gtk::ToggleButton>>,
+    /// The signed/unsigned toggle (active == signed).
+    prog_signed_btn: gtk::ToggleButton,
+    /// The programmer-mode expression / error line.
+    prog_expr_label: gtk::Label,
 }
 
 impl Ui {
+    /// The user's chosen number-format locale.
+    fn locale(&self) -> NumLocale {
+        settings::number_format()
+    }
+
     /// Redraw the display from the calculator state. Called after every input.
     fn render(&self) {
         let calc = self.calc.borrow();
+        let loc = self.locale();
 
         // Reset transient classes; re-added below as the state demands.
         for w in [&self.expr_label, &self.result_label] {
@@ -70,7 +110,7 @@ impl Ui {
         match calc.state() {
             CalcState::Error => {
                 // Keep the (offending) expression up top, show the message big.
-                self.expr_label.set_text(&calc.display_expression());
+                self.expr_label.set_text(&calc.display_expression_with(loc.group(), loc.decimal()));
                 self.expr_label.add_css_class("calc-secondary");
                 self.expr_label.add_css_class("calc-error");
                 let msg = calc.error_message().unwrap_or_default();
@@ -80,23 +120,21 @@ impl Ui {
             }
             CalcState::Result => {
                 // Swap emphasis: expression dims above, result is the big line.
-                self.expr_label.set_text(&calc.display_expression());
+                self.expr_label.set_text(&calc.display_expression_with(loc.group(), loc.decimal()));
                 self.expr_label.add_css_class("calc-secondary");
-                match calc.live_result().or_else(|| {
-                    calc.current_value().map(crate::engine::format_result)
-                }) {
-                    Some(r) => {
-                        self.result_label.set_text(&r);
+                match calc.current_value() {
+                    Some(v) => {
+                        self.result_label.set_text(&crate::engine::format::format_result_locale(v, loc));
                         self.result_label.add_css_class("calc-primary");
                     }
                     None => self.result_label.set_text(""),
                 }
             }
             CalcState::Input => {
-                self.expr_label.set_text(&calc.display_expression());
-                match calc.live_result() {
-                    Some(r) => {
-                        self.result_label.set_text(&r);
+                self.expr_label.set_text(&calc.display_expression_with(loc.group(), loc.decimal()));
+                match calc.live_value() {
+                    Some(v) => {
+                        self.result_label.set_text(&crate::engine::format::format_result_locale(v, loc));
                     }
                     None => self.result_label.set_text(""),
                 }
@@ -151,6 +189,15 @@ impl Ui {
         for b in self.sci_sqrt.iter() {
             b.set_label(if inv { "x\u{00B2}" } else { "\u{221A}" });
         }
+        for b in self.sci_sinh.iter() {
+            b.set_label(if inv { "asinh" } else { "sinh" });
+        }
+        for b in self.sci_cosh.iter() {
+            b.set_label(if inv { "acosh" } else { "cosh" });
+        }
+        for b in self.sci_tanh.iter() {
+            b.set_label(if inv { "atanh" } else { "tanh" });
+        }
 
         // Deg/Rad button: show the CURRENT mode. It's a normal gray
         // scientific button — the mode is communicated by its label ("Deg" /
@@ -166,14 +213,29 @@ impl Ui {
 
     /// Copy the current result/value to the clipboard.
     fn copy_result(&self) {
-        let text = {
-            let calc = self.calc.borrow();
-            if !self.result_label.text().is_empty() {
-                self.result_label.text().to_string()
-            } else if let Some(v) = calc.current_value() {
-                crate::engine::format_result(v)
-            } else {
-                calc.display_expression()
+        let text = match self.content_stack.visible_child_name().as_deref() {
+            Some("converter") => {
+                let st = self.converter.borrow();
+                let units = st.category.units();
+                let from = &units[st.from_idx.min(units.len() - 1)];
+                let to = &units[st.to_idx.min(units.len() - 1)];
+                let r = crate::convert::convert(st.category, from, to, st.value());
+                crate::engine::format::format_result_locale(r, self.locale())
+            }
+            Some("programmer") => {
+                let st = self.prog.borrow();
+                let b = st.base();
+                st.display(b)
+            }
+            _ => {
+                let calc = self.calc.borrow();
+                if !self.result_label.text().is_empty() {
+                    self.result_label.text().to_string()
+                } else if let Some(v) = calc.current_value() {
+                    crate::engine::format::format_result_locale(v, self.locale())
+                } else {
+                    calc.display_expression_with(self.locale().group(), self.locale().decimal())
+                }
             }
         };
         if text.is_empty() {
@@ -181,6 +243,124 @@ impl Ui {
         }
         if let Some(display) = gdk::Display::default() {
             display.clipboard().set_text(&text);
+        }
+    }
+
+    /// Redraw the programmer-mode page from ProgState. Borrow-safe: no RefCell
+    /// borrow is held across any widget setter.
+    fn render_prog(&self) {
+        // Read everything needed into locals, then drop the borrow.
+        let (has_err, err_msg, active_base, hex, dec, oct, bin, expr) = {
+            let st = self.prog.borrow();
+            (
+                st.error().is_some(),
+                st.error().map(|s| s.to_string()).unwrap_or_default(),
+                st.base(),
+                st.display(Base::Hex),
+                st.display(Base::Dec),
+                st.display(Base::Oct),
+                st.display(Base::Bin),
+                st.expression(),
+            )
+        };
+
+        // Grouping for readability.
+        let loc = self.locale();
+        let g = loc.group();
+        let hex_g = group_from_right(&hex, 4, ' ');
+        let oct_g = group_from_right(&oct, 3, ' ');
+        let bin_g = group_from_right(&bin, 4, ' ');
+        // Decimal: strip a leading '-', group the absolute digits, re-prepend.
+        let dec_g = if let Some(rest) = dec.strip_prefix('-') {
+            format!("-{}", group_from_right(rest, 3, g))
+        } else {
+            group_from_right(&dec, 3, g)
+        };
+
+        // Set the 4 value labels [Hex,Dec,Oct,Bin].
+        let grouped = [hex_g, dec_g, oct_g, bin_g];
+        for (label, text) in self.prog_row_values.iter().zip(grouped.iter()) {
+            label.set_text(text);
+        }
+
+        // Highlight the active base row (0=Hex,1=Dec,2=Oct,3=Bin).
+        let active_idx = match active_base {
+            Base::Hex => 0,
+            Base::Dec => 1,
+            Base::Oct => 2,
+            Base::Bin => 3,
+        };
+        for (i, row) in self.prog_rows.iter().enumerate() {
+            if i == active_idx {
+                row.add_css_class("calc-primary");
+            } else {
+                row.remove_css_class("calc-primary");
+            }
+        }
+
+        // Error state: recolor value labels + expr line, set expr text.
+        for label in self.prog_row_values.iter() {
+            if has_err {
+                label.add_css_class("calc-error");
+            } else {
+                label.remove_css_class("calc-error");
+            }
+        }
+        if has_err {
+            self.prog_expr_label.add_css_class("calc-error");
+            self.prog_expr_label.set_text(&err_msg);
+        } else {
+            self.prog_expr_label.remove_css_class("calc-error");
+            self.prog_expr_label.set_text(&expr);
+        }
+
+        // Sync width toggles (guarded so we don't re-fire `toggled`).
+        let want_w = { self.prog.borrow().width() };
+        let want_idx = match want_w {
+            Width::W8 => 0,
+            Width::W16 => 1,
+            Width::W32 => 2,
+            Width::W64 => 3,
+        };
+        for (i, btn) in self.prog_width_btns.iter().enumerate() {
+            let want = i == want_idx;
+            if btn.is_active() != want {
+                btn.set_active(want);
+            }
+        }
+
+        // Sync signed toggle label + state (guarded).
+        let signed = { self.prog.borrow().signed() };
+        self.prog_signed_btn
+            .set_label(if signed { "signed" } else { "unsigned" });
+        if self.prog_signed_btn.is_active() != signed {
+            self.prog_signed_btn.set_active(signed);
+        }
+    }
+
+    /// Enable each digit key only when it's a valid digit for the active base:
+    /// BIN→0,1; OCT→0-7; DEC→0-9; HEX→0-9 + A-F.
+    fn prog_sync_digit_sensitivity(&self) {
+        let base = { self.prog.borrow().base() };
+        let hex_chars = ['A', 'B', 'C', 'D', 'E', 'F'];
+        for (btn, c) in self.prog_hex_btns.iter().zip(hex_chars.iter()) {
+            let ok = base.is_valid_digit(*c);
+            btn.set_sensitive(ok);
+            if ok {
+                btn.remove_css_class("calc-disabled");
+            } else {
+                btn.add_css_class("calc-disabled");
+            }
+        }
+        for (i, btn) in self.prog_digit_btns.iter().enumerate() {
+            let c = std::char::from_digit(i as u32, 10).unwrap();
+            let ok = base.is_valid_digit(c);
+            btn.set_sensitive(ok);
+            if ok {
+                btn.remove_css_class("calc-disabled");
+            } else {
+                btn.add_css_class("calc-disabled");
+            }
         }
     }
 }
@@ -278,6 +458,150 @@ pub fn build_ui(app: &adw::Application) {
     let sp = make_sci_buttons();
     let sl = make_sci_buttons();
 
+    let content_stack = adw::ViewStack::new();
+    content_stack.set_hhomogeneous(false); // CRITICAL anti-regression
+    content_stack.set_vhomogeneous(false); // CRITICAL anti-regression
+    let window_title = adw::WindowTitle::new("Calculator", "");
+    let history_btn = gtk::Button::builder()
+        .icon_name("document-open-recent-symbolic")
+        .tooltip_text("History")
+        .build();
+    let mode_action = gio::SimpleAction::new_stateful(
+        "mode",
+        Some(glib::VariantTy::STRING),
+        &"calculator".to_variant(),
+    );
+    let conv_top_label = gtk::Label::builder()
+        .label("")
+        .css_classes(["calc-expression", "calc-secondary"])
+        .halign(gtk::Align::End)
+        .xalign(1.0)
+        .wrap(false)
+        .single_line_mode(true)
+        .ellipsize(gtk::pango::EllipsizeMode::Start)
+        .build();
+    let conv_bottom_label = gtk::Label::builder()
+        .label("")
+        .css_classes(["calc-result", "calc-primary"])
+        .halign(gtk::Align::End)
+        .xalign(1.0)
+        .wrap(false)
+        .single_line_mode(true)
+        .ellipsize(gtk::pango::EllipsizeMode::Start)
+        .build();
+    conv_bottom_label.set_selectable(false);
+
+    // ── Programmer-mode widgets (built before `ui` so its fields are live) ──
+    let prog = Rc::new(RefCell::new(crate::prog_state::ProgState::new(
+        settings::prog_base(),
+        settings::prog_width(),
+        settings::prog_signed(),
+    )));
+    // 4 base rows [Hex,Dec,Oct,Bin]: a flat button whose child holds a name +
+    // value label. Value labels are kept for the render pass.
+    let mut prog_rows_v: Vec<gtk::Button> = Vec::with_capacity(4);
+    let mut prog_row_values_v: Vec<gtk::Label> = Vec::with_capacity(4);
+    for (i, (_base, name)) in [
+        (Base::Hex, "HEX"),
+        (Base::Dec, "DEC"),
+        (Base::Oct, "OCT"),
+        (Base::Bin, "BIN"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let name_label = gtk::Label::builder()
+            .label(*name)
+            .css_classes(["calc-prog-baselabel"])
+            .width_request(46)
+            .xalign(0.0)
+            .halign(gtk::Align::Start)
+            .build();
+        let value_label = gtk::Label::builder()
+            .label("0")
+            .css_classes(["calc-prog-value"])
+            .halign(gtk::Align::End)
+            .hexpand(true)
+            .xalign(1.0)
+            .build();
+        if i == 3 {
+            // BIN row: allow up to 2 lines so 64-bit binary wraps within the
+            // fixed-height block rather than reflowing it.
+            value_label.set_single_line_mode(false);
+            value_label.set_wrap(true);
+            value_label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+            value_label.set_lines(2);
+            value_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        } else {
+            value_label.set_single_line_mode(true);
+            value_label.set_ellipsize(gtk::pango::EllipsizeMode::Start);
+        }
+        let row_box = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(8)
+            .build();
+        row_box.append(&name_label);
+        row_box.append(&value_label);
+        let row_btn = gtk::Button::builder()
+            .css_classes(["calc-prog-row", "flat"])
+            .can_focus(false)
+            .hexpand(true)
+            .child(&row_box)
+            .build();
+        prog_rows_v.push(row_btn);
+        prog_row_values_v.push(value_label);
+    }
+    // A–F hex keypad buttons (built here, wired + placed in the page builder).
+    let mut prog_hex_btns_v: Vec<gtk::Button> = Vec::with_capacity(6);
+    for label in ["A", "B", "C", "D", "E", "F"] {
+        prog_hex_btns_v.push(
+            gtk::Button::builder()
+                .label(label)
+                .css_classes(["calc-btn", "calc-btn-prog", "calc-digit"])
+                .hexpand(true)
+                .vexpand(false)
+                .can_focus(false)
+                .build(),
+        );
+    }
+    // 0–9 digit keypad buttons (built here, wired + placed in the page builder).
+    let mut prog_digit_btns_v: Vec<gtk::Button> = Vec::with_capacity(10);
+    for d in 0u32..=9 {
+        prog_digit_btns_v.push(
+            gtk::Button::builder()
+                .label(d.to_string())
+                .css_classes(["calc-btn", "calc-btn-prog", "calc-digit"])
+                .hexpand(true)
+                .vexpand(false)
+                .can_focus(false)
+                .build(),
+        );
+    }
+    // 4 width toggles [W8,W16,W32,W64], grouped so exactly one is active.
+    let mut prog_width_btns_v: Vec<gtk::ToggleButton> = Vec::with_capacity(4);
+    for label in ["8", "16", "32", "64"] {
+        prog_width_btns_v.push(
+            gtk::ToggleButton::builder()
+                .label(label)
+                .can_focus(false)
+                .build(),
+        );
+    }
+    let prog_signed_btn = gtk::ToggleButton::builder()
+        .label("signed")
+        .css_classes(["calc-prog-sign"])
+        .can_focus(false)
+        .build();
+    let prog_expr_label = gtk::Label::builder()
+        .label("")
+        .css_classes(["calc-expression", "calc-secondary"])
+        .halign(gtk::Align::End)
+        .xalign(1.0)
+        .wrap(false)
+        .single_line_mode(true)
+        .ellipsize(gtk::pango::EllipsizeMode::Start)
+        .build();
+
     let ui = Ui {
         calc: calc.clone(),
         history: history.clone(),
@@ -293,6 +617,9 @@ pub fn build_ui(app: &adw::Application) {
         sci_ln: Rc::new(vec![sp.ln.clone(), sl.ln.clone()]),
         sci_log: Rc::new(vec![sp.log.clone(), sl.log.clone()]),
         sci_sqrt: Rc::new(vec![sp.sqrt.clone(), sl.sqrt.clone()]),
+        sci_sinh: Rc::new(vec![sp.sinh.clone(), sl.sinh.clone()]),
+        sci_cosh: Rc::new(vec![sp.cosh.clone(), sl.cosh.clone()]),
+        sci_tanh: Rc::new(vec![sp.tanh.clone(), sl.tanh.clone()]),
         nav: nav.clone(),
         converter: Rc::new(RefCell::new(ConverterState {
             category: start_cat,
@@ -300,6 +627,20 @@ pub fn build_ui(app: &adw::Application) {
             to_idx: category_index_of(start_cat, start_cat.default_to().id),
             input: String::new(),
         })),
+        content_stack: content_stack.clone(),
+        window_title: window_title.clone(),
+        mode_action: mode_action.clone(),
+        history_btn: history_btn.clone(),
+        conv_top_label: conv_top_label.clone(),
+        conv_bottom_label: conv_bottom_label.clone(),
+        prog: prog.clone(),
+        prog_rows: Rc::new(prog_rows_v.clone()),
+        prog_row_values: Rc::new(prog_row_values_v.clone()),
+        prog_hex_btns: Rc::new(prog_hex_btns_v.clone()),
+        prog_digit_btns: Rc::new(prog_digit_btns_v.clone()),
+        prog_width_btns: Rc::new(prog_width_btns_v.clone()),
+        prog_signed_btn: prog_signed_btn.clone(),
+        prog_expr_label: prog_expr_label.clone(),
     };
 
     // Wire both stateful button sets (each set wired exactly once — no widget
@@ -307,18 +648,26 @@ pub fn build_ui(app: &adw::Application) {
     wire_sci_buttons(&ui, &sp);
     wire_sci_buttons(&ui, &sl);
 
+    ui.mode_action.connect_activate(clone!(
+        #[weak]
+        ui,
+        #[upgrade_or_default]
+        move |action, param| {
+            let Some(target) = param.and_then(|p| p.str().map(|s| s.to_string())) else {
+                return;
+            };
+            action.set_state(&target.to_variant());
+            switch_mode(&ui, &target);
+        }
+    ));
+
     // Apply the persisted inverse mode BEFORE the first sync/render, using the
     // top-of-fn `calc` local (no active borrow conflict here).
     calc.borrow_mut().set_inv(settings::inverse_mode());
 
     // ── Header: history (left), kebab (right) ────────────────────────────
     let header = adw::HeaderBar::new();
-    header.set_show_title(false);
-
-    let history_btn = gtk::Button::builder()
-        .icon_name("document-open-recent-symbolic")
-        .tooltip_text("History")
-        .build();
+    header.set_title_widget(Some(&window_title));
     history_btn.connect_clicked(clone!(
         #[weak]
         ui,
@@ -326,22 +675,26 @@ pub fn build_ui(app: &adw::Application) {
     ));
     header.pack_start(&history_btn);
 
-    let converter_btn = gtk::Button::builder()
-        .icon_name("object-flip-vertical-symbolic")
-        .tooltip_text("Unit converter")
-        .build();
-    converter_btn.connect_clicked(clone!(
-        #[weak]
-        ui,
-        move |_| show_converter(&ui)
-    ));
-    header.pack_start(&converter_btn);
-
-    // Kebab menu (Copy / Clear history / About), backed by a gio::Menu model.
+    // Kebab menu (Mode / Copy / Clear history / Preferences / About), backed by
+    // a sectioned gio::Menu model.
     let menu_model = gio::Menu::new();
-    menu_model.append(Some("Copy result"), Some("calc.copy"));
-    menu_model.append(Some("Clear history"), Some("calc.clear-history"));
-    menu_model.append(Some("About Calculator"), Some("calc.about"));
+
+    let mode_section = gio::Menu::new();
+    mode_section.append(Some("Calculator"), Some("calc.mode::calculator"));
+    mode_section.append(Some("Convert"), Some("calc.mode::converter"));
+    mode_section.append(Some("Programmer"), Some("calc.mode::programmer"));
+    menu_model.append_section(Some("Mode"), &mode_section);
+
+    let ops_section = gio::Menu::new();
+    ops_section.append(Some("Copy result"), Some("calc.copy"));
+    ops_section.append(Some("Clear history"), Some("calc.clear-history"));
+    menu_model.append_section(None, &ops_section);
+
+    let app_section = gio::Menu::new();
+    app_section.append(Some("Preferences"), Some("calc.preferences"));
+    app_section.append(Some("About Calculator"), Some("calc.about"));
+    menu_model.append_section(None, &app_section);
+
     let kebab = gtk::MenuButton::builder()
         .icon_name("view-more-symbolic")
         .tooltip_text("Menu")
@@ -505,15 +858,30 @@ pub fn build_ui(app: &adw::Application) {
     // ── Body: display (top), keypad stack (bottom) ───────────────────────
     // The chevron now lives inside the portrait page, so it is NOT appended
     // to the body here.
-    let body = gtk::Box::builder()
+    // The calculator mode's page: display (top) + keypad (bottom).
+    let calculator_page = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .build();
-    body.append(&display);
-    body.append(&keypad_clamp);
+    calculator_page.append(&display);
+    calculator_page.append(&keypad_clamp);
+
+    content_stack.add_titled(&calculator_page, Some("calculator"), "Calculator");
+    let converter_page = build_converter_page(&ui);
+    content_stack.add_titled(&converter_page, Some("converter"), "Convert");
+    let programmer_page = build_programmer_page(
+        &ui,
+        prog_rows_v,
+        prog_hex_btns_v,
+        prog_digit_btns_v,
+        prog_width_btns_v,
+        &prog_signed_btn,
+        &prog_expr_label,
+    );
+    content_stack.add_titled(&programmer_page, Some("programmer"), "Programmer");
 
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
-    toolbar.set_content(Some(&body));
+    toolbar.set_content(Some(&content_stack));
 
     let root_page = adw::NavigationPage::builder()
         .title("Calculator")
@@ -521,7 +889,6 @@ pub fn build_ui(app: &adw::Application) {
         .child(&toolbar)
         .build();
     nav.add(&root_page);
-
     window.set_content(Some(&nav));
 
     // Phone-adaptive breakpoint at 550 sp (registration point).
@@ -548,7 +915,7 @@ pub fn build_ui(app: &adw::Application) {
     bp_landscape.add_setter(&display, "vexpand", Some(&false.to_value()));
     bp_landscape.add_setter(&display, "valign", Some(&gtk::Align::Start.to_value()));
     bp_landscape.add_setter(&display, "height-request", Some(&110i32.to_value()));
-    bp_landscape.add_setter(&display, "css-classes", Some(&vec!["calc-display", "landscape"].to_value()));
+    bp_landscape.add_setter(&display, "css-classes", Some(&["calc-display", "landscape"].to_value()));
     bp_landscape.add_setter(&keypad_stack, "vexpand", Some(&true.to_value()));
     bp_landscape.add_setter(&keypad_clamp, "vexpand", Some(&true.to_value()));
     bp_landscape.add_setter(&keypad_clamp, "valign", Some(&gtk::Align::Fill.to_value()));
@@ -565,6 +932,18 @@ pub fn build_ui(app: &adw::Application) {
 
     ui.sync_sci();
     ui.render();
+    ui.prog_sync_digit_sensitivity();
+    ui.render_prog();
+    // Restore the saved top-level mode (stack child, title, history-btn
+    // visibility, radio state, and a re-render of the active page).
+    let saved_mode = settings::active_mode();
+    let saved_mode = match saved_mode.as_str() {
+        "converter" => "converter",
+        "programmer" => "programmer",
+        _ => "calculator",
+    };
+    ui.mode_action.set_state(&saved_mode.to_variant());
+    switch_mode(&ui, saved_mode);
     window.present();
 }
 
@@ -624,6 +1003,9 @@ struct SciButtons {
     ln: gtk::Button,
     log: gtk::Button,
     sqrt: gtk::Button,
+    sinh: gtk::Button,
+    cosh: gtk::Button,
+    tanh: gtk::Button,
 }
 
 /// Build a fresh set of the 8 stateful scientific buttons (deg, inv, sin, cos,
@@ -639,6 +1021,9 @@ fn make_sci_buttons() -> SciButtons {
         ln: sci_button("ln"),
         log: sci_button("log"),
         sqrt: sci_button("\u{221A}"),
+        sinh: sci_button("sinh"),
+        cosh: sci_button("cosh"),
+        tanh: sci_button("tanh"),
     }
 }
 
@@ -684,6 +1069,9 @@ fn wire_sci_buttons(ui: &Ui, s: &SciButtons) {
     wire_sci(&s.ln, ui, |c| c.press_func(Func::Ln));
     wire_sci(&s.log, ui, |c| c.press_func(Func::Log));
     wire_sci(&s.sqrt, ui, |c| c.press_sqrt());
+    wire_sci(&s.sinh, ui, |c| c.press_func(Func::Sinh));
+    wire_sci(&s.cosh, ui, |c| c.press_func(Func::Cosh));
+    wire_sci(&s.tanh, ui, |c| c.press_func(Func::Tanh));
 }
 
 /// The 5×4 basic keypad grid.
@@ -794,6 +1182,14 @@ fn build_scientific_pad_portrait(ui: &Ui, s: &SciButtons) -> gtk::Grid {
     wire_sci(&fact, ui, |c| c.press_factorial());
     let euler = sci_button("e");
     wire_sci(&euler, ui, |c| c.press_e());
+    let abs_btn = sci_button("|x|");
+    wire_sci(&abs_btn, ui, |c| c.press_abs());
+    let log2_btn = sci_button("log\u{2082}");
+    wire_sci(&log2_btn, ui, |c| c.press_log2());
+    let recip = sci_button("1/x");
+    wire_sci(&recip, ui, |c| c.press_reciprocal());
+    let negate = sci_button("\u{00B1}");
+    wire_sci(&negate, ui, |c| c.press_negate());
 
     // Row 0: √ π ^ !
     grid.attach(&s.sqrt, 0, 0, 1, 1);
@@ -812,6 +1208,17 @@ fn build_scientific_pad_portrait(ui: &Ui, s: &SciButtons) -> gtk::Grid {
     grid.attach(&euler, 1, 2, 1, 1);
     grid.attach(&s.ln, 2, 2, 1, 1);
     grid.attach(&s.log, 3, 2, 1, 1);
+
+    // Row 3: sinh cosh tanh log₂
+    grid.attach(&s.sinh, 0, 3, 1, 1);
+    grid.attach(&s.cosh, 1, 3, 1, 1);
+    grid.attach(&s.tanh, 2, 3, 1, 1);
+    grid.attach(&log2_btn, 3, 3, 1, 1);
+
+    // Row 4: 1/x |x| ± (cell 3,4 intentionally left empty)
+    grid.attach(&recip, 0, 4, 1, 1);
+    grid.attach(&abs_btn, 1, 4, 1, 1);
+    grid.attach(&negate, 2, 4, 1, 1);
 
     grid
 }
@@ -849,9 +1256,25 @@ fn build_scientific_pad_landscape(ui: &Ui, s: &SciButtons) -> gtk::Grid {
     wire_sci(&euler, ui, |c| c.press_e());
     euler.add_css_class("calc-sci-land");
     euler.set_vexpand(true);
+    let abs_btn = sci_button("|x|");
+    wire_sci(&abs_btn, ui, |c| c.press_abs());
+    abs_btn.add_css_class("calc-sci-land");
+    abs_btn.set_vexpand(true);
+    let log2_btn = sci_button("log\u{2082}");
+    wire_sci(&log2_btn, ui, |c| c.press_log2());
+    log2_btn.add_css_class("calc-sci-land");
+    log2_btn.set_vexpand(true);
+    let recip = sci_button("1/x");
+    wire_sci(&recip, ui, |c| c.press_reciprocal());
+    recip.add_css_class("calc-sci-land");
+    recip.set_vexpand(true);
+    let negate = sci_button("\u{00B1}");
+    wire_sci(&negate, ui, |c| c.press_negate());
+    negate.add_css_class("calc-sci-land");
+    negate.set_vexpand(true);
 
     // Landscape sci buttons: shrink class + fill row height.
-    for b in [&s.inv, &s.deg, &s.sqrt, &s.sin, &s.ln, &s.cos, &s.log, &s.tan] {
+    for b in [&s.inv, &s.deg, &s.sqrt, &s.sin, &s.ln, &s.cos, &s.log, &s.tan, &s.sinh, &s.cosh, &s.tanh] {
         b.add_css_class("calc-sci-land");
         b.set_vexpand(true);
     }
@@ -876,6 +1299,19 @@ fn build_scientific_pad_landscape(ui: &Ui, s: &SciButtons) -> gtk::Grid {
     grid.attach(&euler, 1, 3, 1, 1);
     grid.attach(&fact, 2, 3, 1, 1);
 
+    // Row 4: sinh cosh tanh
+    grid.attach(&s.sinh, 0, 4, 1, 1);
+    grid.attach(&s.cosh, 1, 4, 1, 1);
+    grid.attach(&s.tanh, 2, 4, 1, 1);
+
+    // Row 5: log₂ |x| 1/x
+    grid.attach(&log2_btn, 0, 5, 1, 1);
+    grid.attach(&abs_btn, 1, 5, 1, 1);
+    grid.attach(&recip, 2, 5, 1, 1);
+
+    // Row 6: ± (cells 1,6 and 2,6 intentionally left empty)
+    grid.attach(&negate, 0, 6, 1, 1);
+
     grid
 }
 
@@ -892,13 +1328,7 @@ fn install_actions(app: &adw::Application, ui: &Ui, window: &adw::ApplicationWin
     ));
     group.add_action(&copy);
 
-    let converter = gio::SimpleAction::new("converter", None);
-    converter.connect_activate(clone!(
-        #[weak]
-        ui,
-        move |_, _| show_converter(&ui)
-    ));
-    group.add_action(&converter);
+    group.add_action(&ui.mode_action);
 
     let clear = gio::SimpleAction::new("clear-history", None);
     clear.connect_activate(clone!(
@@ -920,6 +1350,17 @@ fn install_actions(app: &adw::Application, ui: &Ui, window: &adw::ApplicationWin
     ));
     group.add_action(&about);
 
+    let preferences = gio::SimpleAction::new("preferences", None);
+    preferences.connect_activate(clone!(
+        #[weak]
+        ui,
+        #[weak]
+        window,
+        #[upgrade_or_default]
+        move |_, _| present_preferences(&ui, &window)
+    ));
+    group.add_action(&preferences);
+
     window.insert_action_group("calc", Some(&group));
     let _ = app; // app kept in signature for parity with the house pattern
 }
@@ -939,6 +1380,79 @@ fn present_about(window: &adw::ApplicationWindow) {
         )
         .build();
     about.present(Some(window));
+}
+
+/// Switch the visible mode: set the stack child, retitle the header, toggle
+/// the History button, persist the choice, and re-render the newly-visible
+/// mode's display. Borrow-safe: no RefCell borrow is held across
+/// set_visible_child_name / render.
+fn switch_mode(ui: &Ui, mode: &str) {
+    ui.content_stack.set_visible_child_name(mode);
+    let title = match mode {
+        "converter" => "Convert",
+        "programmer" => "Programmer",
+        _ => "Calculator",
+    };
+    ui.window_title.set_title(title);
+    // History is a calculator-mode concept; hide the button elsewhere.
+    ui.history_btn.set_visible(mode == "calculator");
+    settings::set_active_mode(mode);
+    match mode {
+        "converter" => {
+            let top = ui.conv_top_label.clone();
+            let bottom = ui.conv_bottom_label.clone();
+            converter_refresh(ui, &top, &bottom);
+        }
+        "programmer" => ui.render_prog(),
+        _ => ui.render(),
+    }
+}
+
+/// The Preferences dialog: number-format locale selector.
+fn present_preferences(ui: &Ui, window: &adw::ApplicationWindow) {
+    let page = adw::PreferencesPage::new();
+    let group = adw::PreferencesGroup::builder().title("Formatting").build();
+
+    let model = gtk::StringList::new(&["1,234.56 (English)", "1.234,56 (Spanish)"]);
+    let combo = adw::ComboRow::builder()
+        .title("Number format")
+        .model(&model)
+        .build();
+    let cur = settings::number_format();
+    combo.set_selected(match cur {
+        NumLocale::EnUs => 0,
+        NumLocale::EsAr => 1,
+    });
+
+    combo.connect_selected_notify(clone!(
+        #[weak]
+        ui,
+        #[upgrade_or_default]
+        move |row| {
+            let locale = if row.selected() == 1 {
+                NumLocale::EsAr
+            } else {
+                NumLocale::EnUs
+            };
+            settings::set_number_format(locale);
+            match settings::active_mode().as_str() {
+                "converter" => {
+                    let top = ui.conv_top_label.clone();
+                    let bottom = ui.conv_bottom_label.clone();
+                    converter_refresh(&ui, &top, &bottom);
+                }
+                "programmer" => ui.render_prog(),
+                _ => ui.render(),
+            }
+        }
+    ));
+
+    group.add(&combo);
+    page.add(&group);
+
+    let dialog = adw::PreferencesDialog::new();
+    dialog.add(&page);
+    dialog.present(Some(window));
 }
 
 /// Attach a long-press + right-click popover offering Copy and memory ops to the
@@ -1266,6 +1780,29 @@ fn show_history(ui: &Ui) {
     ui.nav.push(&page);
 }
 
+/// Localize a canonical decimal number string (e.g. "1234.5") for display:
+/// group the integer digits and swap '.' for the locale decimal separator.
+/// A leading '-' and a trailing '.' (mid-entry) are preserved. Does not mutate
+/// the canonical string the converter stores internally.
+fn localize_decimal_string(s: &str, loc: NumLocale) -> String {
+    if s.is_empty() {
+        return s.to_string();
+    }
+    let (sign, body) = if let Some(rest) = s.strip_prefix('-') {
+        ("-", rest)
+    } else {
+        ("", s)
+    };
+    match body.split_once('.') {
+        Some((int_part, frac)) => {
+            let grouped = group_from_right(int_part, 3, loc.group());
+            // Keep a trailing separator when the user just typed "12." mid-entry.
+            format!("{}{}{}{}", sign, grouped, loc.decimal(), frac)
+        }
+        None => format!("{}{}", sign, group_from_right(body, 3, loc.group())),
+    }
+}
+
 /// Recompute the converted value and update the two display labels from the
 /// current ConverterState. `top`/`bottom` are the two display labels.
 fn converter_refresh(ui: &Ui, top: &gtk::Label, bottom: &gtk::Label) {
@@ -1274,9 +1811,10 @@ fn converter_refresh(ui: &Ui, top: &gtk::Label, bottom: &gtk::Label) {
     let from = &units[st.from_idx.min(units.len() - 1)];
     let to = &units[st.to_idx.min(units.len() - 1)];
     let shown_input = if st.input.is_empty() { "0".to_string() } else { st.input.clone() };
-    top.set_text(&format!("{} {}", shown_input, from.symbol));
+    let localized_input = localize_decimal_string(&shown_input, ui.locale());
+    top.set_text(&format!("{} {}", localized_input, from.symbol));
     let result = crate::convert::convert(st.category, from, to, st.value());
-    bottom.set_text(&format!("{} {}", crate::convert::format_conversion(result), to.symbol));
+    bottom.set_text(&format!("{} {}", crate::engine::format::format_result_locale(result, ui.locale()), to.symbol));
 }
 
 /// Build a round converter keypad button of the given label + style class that
@@ -1312,36 +1850,11 @@ fn conv_key(
     btn
 }
 
-/// Build and push the unit-converter navigation page (reduced keypad, no OSK).
-fn show_converter(ui: &Ui) {
-    {
-        let cat = settings::converter_category();
-        let mut st = ui.converter.borrow_mut();
-        st.category = cat;
-        st.from_idx = category_index_of(cat, cat.default_from().id);
-        st.to_idx = category_index_of(cat, cat.default_to().id);
-        st.input.clear();
-    }
-
-    let top_label = gtk::Label::builder()
-        .label("")
-        .css_classes(["calc-expression", "calc-secondary"])
-        .halign(gtk::Align::End)
-        .xalign(1.0)
-        .wrap(false)
-        .single_line_mode(true)
-        .ellipsize(gtk::pango::EllipsizeMode::Start)
-        .build();
-    let bottom_label = gtk::Label::builder()
-        .label("")
-        .css_classes(["calc-result", "calc-primary"])
-        .halign(gtk::Align::End)
-        .xalign(1.0)
-        .wrap(false)
-        .single_line_mode(true)
-        .ellipsize(gtk::pango::EllipsizeMode::Start)
-        .build();
-    bottom_label.set_selectable(false);
+/// Build the unit-converter page (reduced keypad, no OSK) and return its root
+/// widget for insertion into the mode stack.
+fn build_converter_page(ui: &Ui) -> gtk::Widget {
+    let top_label = ui.conv_top_label.clone();
+    let bottom_label = ui.conv_bottom_label.clone();
 
     let display = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -1580,7 +2093,7 @@ fn show_converter(ui: &Ui) {
                 let from = &units[st.from_idx.min(units.len() - 1)];
                 let to = &units[st.to_idx.min(units.len() - 1)];
                 let r = crate::convert::convert(st.category, from, to, st.value());
-                display.clipboard().set_text(&crate::convert::format_conversion(r));
+                display.clipboard().set_text(&crate::engine::format::format_result_locale(r, ui.locale()));
             }
         }
     ));
@@ -1598,7 +2111,7 @@ fn show_converter(ui: &Ui) {
                 let from = &units[st.from_idx.min(units.len() - 1)];
                 let to = &units[st.to_idx.min(units.len() - 1)];
                 let r = crate::convert::convert(st.category, from, to, st.value());
-                display.clipboard().set_text(&crate::convert::format_conversion(r));
+                display.clipboard().set_text(&crate::engine::format::format_result_locale(r, ui.locale()));
             }
         }
     ));
@@ -1627,19 +2140,387 @@ fn show_converter(ui: &Ui) {
         .child(&scroller)
         .build();
 
-    let header = adw::HeaderBar::new();
-    let toolbar = adw::ToolbarView::new();
-    toolbar.add_top_bar(&header);
-    toolbar.set_content(Some(&clamp));
+    converter_refresh(ui, &top_label, &bottom_label);
+    clamp.upcast::<gtk::Widget>()
+}
 
-    let page = adw::NavigationPage::builder()
-        .title("Convert")
-        .tag("converter")
-        .child(&toolbar)
+/// Group the digits of `s` into runs of `n` counted from the RIGHT, inserting
+/// `sep` between runs. Any sign must be stripped by the caller. e.g.
+/// `group_from_right("DEADBEEF", 4, ' ') == "DEAD BEEF"`.
+fn group_from_right(s: &str, n: usize, sep: char) -> String {
+    if s.is_empty() || n == 0 {
+        return s.to_string();
+    }
+    let chars: Vec<char> = s.chars().collect();
+    let len = chars.len();
+    let mut out = String::with_capacity(len + len / n);
+    for (i, c) in chars.iter().enumerate() {
+        // Insert a separator before a char whose distance from the right is a
+        // positive multiple of n (i.e. at the start of a new left-side group).
+        let from_right = len - i;
+        if i != 0 && from_right % n == 0 {
+            out.push(sep);
+        }
+        out.push(*c);
+    }
+    out
+}
+
+/// A programmer operator key: appends the `sym` token via press_op, re-renders.
+fn prog_op_btn(ui: &Ui, label: &str, sym: &str, class: &str) -> gtk::Button {
+    let sym = sym.to_string();
+    let btn = gtk::Button::builder()
+        .label(label)
+        .css_classes(["calc-btn", "calc-btn-prog", class])
+        .hexpand(true)
+        .vexpand(false)
+        .can_focus(false)
+        .build();
+    btn.connect_clicked(clone!(
+        #[weak]
+        ui,
+        #[upgrade_or_default]
+        move |_| {
+            {
+                let mut st = ui.prog.borrow_mut();
+                st.press_op(&sym);
+            }
+            ui.render_prog();
+        }
+    ));
+    btn
+}
+
+/// Assemble the programmer-mode page: a fixed-height base-display block (Hex/
+/// Dec/Oct/Bin), a controls strip (bit-width segmented toggles + signed toggle),
+/// the expression line, and a 5-column keypad. Returns the page root widget.
+fn build_programmer_page(
+    ui: &Ui,
+    rows: Vec<gtk::Button>,
+    hex_btns: Vec<gtk::Button>,
+    digit_btns: Vec<gtk::Button>,
+    width_btns: Vec<gtk::ToggleButton>,
+    signed_btn: &gtk::ToggleButton,
+    expr_label: &gtk::Label,
+) -> gtk::Widget {
+    // (A) Base display block — FIXED HEIGHT to keep the keypad pixel-stable.
+    let base_block = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(2)
+        .height_request(150)
+        .margin_start(20)
+        .margin_end(20)
+        .margin_top(8)
+        .margin_bottom(4)
+        .build();
+    let base_specs = [Base::Hex, Base::Dec, Base::Oct, Base::Bin];
+    for (row_btn, base) in rows.iter().zip(base_specs.iter()) {
+        let base = *base;
+        row_btn.connect_clicked(clone!(
+            #[weak]
+            ui,
+            #[upgrade_or_default]
+            move |_| {
+                {
+                    let mut st = ui.prog.borrow_mut();
+                    st.set_base(base);
+                }
+                ui.prog_sync_digit_sensitivity();
+                settings::set_prog_base(base);
+                ui.render_prog();
+            }
+        ));
+        base_block.append(row_btn);
+    }
+
+    // (B) Controls strip: width segmented control + signed toggle.
+    let width_box = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .build();
+    width_box.add_css_class("linked");
+    // Group the toggles so exactly one is active at a time.
+    let first = width_btns[0].clone();
+    for btn in width_btns.iter().skip(1) {
+        btn.set_group(Some(&first));
+    }
+    for (i, btn) in width_btns.iter().enumerate() {
+        let w = [Width::W8, Width::W16, Width::W32, Width::W64][i];
+        btn.connect_toggled(clone!(
+            #[weak]
+            ui,
+            #[upgrade_or_default]
+            move |b| {
+                if !b.is_active() {
+                    return; // ignore the deactivating half of the pair
+                }
+                let cur = { ui.prog.borrow().width() };
+                if cur == w {
+                    return; // guard against the render-driven set_active
+                }
+                {
+                    let mut st = ui.prog.borrow_mut();
+                    st.set_width(w);
+                }
+                settings::set_prog_width(w);
+                ui.render_prog();
+            }
+        ));
+        width_box.append(btn);
+    }
+
+    // Signed/unsigned toggle: active == signed.
+    signed_btn.connect_toggled(clone!(
+        #[weak]
+        ui,
+        #[upgrade_or_default]
+        move |b| {
+            let want = b.is_active();
+            let cur = { ui.prog.borrow().signed() };
+            if cur == want {
+                return;
+            }
+            {
+                let mut st = ui.prog.borrow_mut();
+                st.set_signed(want);
+            }
+            settings::set_prog_signed(want);
+            ui.render_prog();
+        }
+    ));
+
+    let controls = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(8)
+        .margin_start(12)
+        .margin_end(12)
+        .build();
+    controls.append(&width_box);
+    let spacer = gtk::Box::builder().hexpand(true).build();
+    controls.append(&spacer);
+    controls.append(signed_btn);
+
+    // Expression / error line (small, dim, right-aligned).
+    let expr_row = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .margin_start(20)
+        .margin_end(20)
+        .build();
+    expr_label.set_hexpand(true);
+    expr_row.append(expr_label);
+
+    // (C) Keypad — 5 columns.
+    let grid = gtk::Grid::builder()
+        .row_spacing(8)
+        .column_spacing(8)
+        .row_homogeneous(true)
+        .column_homogeneous(true)
+        .margin_start(12)
+        .margin_end(12)
+        .margin_bottom(16)
         .build();
 
-    converter_refresh(ui, &top_label, &bottom_label);
-    ui.nav.push(&page);
+    // Hex digit keys A–F: wire press_digit and place them; store nothing new
+    // (they already live in ui.prog_hex_btns for the sensitivity sync).
+    let hex_chars = ['A', 'B', 'C', 'D', 'E', 'F'];
+    for (btn, c) in hex_btns.iter().zip(hex_chars.iter()) {
+        let c = *c;
+        btn.connect_clicked(clone!(
+            #[weak]
+            ui,
+            #[upgrade_or_default]
+            move |_| {
+                {
+                    let mut st = ui.prog.borrow_mut();
+                    st.press_digit(c);
+                }
+                ui.render_prog();
+            }
+        ));
+    }
+
+    // Wire the 0–9 digit keys (press_digit). Placed into the grid below.
+    for (i, btn) in digit_btns.iter().enumerate() {
+        let c = std::char::from_digit(i as u32, 10).unwrap();
+        btn.connect_clicked(clone!(
+            #[weak]
+            ui,
+            #[upgrade_or_default]
+            move |_| {
+                {
+                    let mut st = ui.prog.borrow_mut();
+                    st.press_digit(c);
+                }
+                ui.render_prog();
+            }
+        ));
+    }
+
+    // Backspace (icon) and AC (clear) and equals — built inline.
+    let back = gtk::Button::builder()
+        .icon_name("edit-clear-symbolic")
+        .css_classes(["calc-btn", "calc-btn-prog", "calc-function"])
+        .hexpand(true)
+        .vexpand(false)
+        .can_focus(false)
+        .build();
+    back.connect_clicked(clone!(
+        #[weak]
+        ui,
+        #[upgrade_or_default]
+        move |_| {
+            {
+                let mut st = ui.prog.borrow_mut();
+                st.backspace();
+            }
+            ui.render_prog();
+        }
+    ));
+    let ac = gtk::Button::builder()
+        .label("AC")
+        .css_classes(["calc-btn", "calc-btn-prog", "calc-clear"])
+        .hexpand(true)
+        .vexpand(false)
+        .can_focus(false)
+        .build();
+    ac.connect_clicked(clone!(
+        #[weak]
+        ui,
+        #[upgrade_or_default]
+        move |_| {
+            {
+                let mut st = ui.prog.borrow_mut();
+                st.clear();
+            }
+            ui.render_prog();
+        }
+    ));
+    let equals = gtk::Button::builder()
+        .label("=")
+        .css_classes(["calc-btn", "calc-btn-prog", "calc-equals"])
+        .hexpand(true)
+        .vexpand(false)
+        .can_focus(false)
+        .build();
+    equals.connect_clicked(clone!(
+        #[weak]
+        ui,
+        #[upgrade_or_default]
+        move |_| {
+            {
+                let mut st = ui.prog.borrow_mut();
+                st.equals();
+            }
+            ui.render_prog();
+        }
+    ));
+
+    // Grid layout (col, row); 5 columns wide.
+    // Row 0: A  B  AND(&)  OR(|)   ⌫
+    grid.attach(&hex_btns[0], 0, 0, 1, 1); // A
+    grid.attach(&hex_btns[1], 1, 0, 1, 1); // B
+    grid.attach(&prog_op_btn(ui, "AND", "&", "calc-function"), 2, 0, 1, 1);
+    grid.attach(&prog_op_btn(ui, "OR", "|", "calc-function"), 3, 0, 1, 1);
+    grid.attach(&back, 4, 0, 1, 1);
+    // Row 1: C  D  XOR(^)  NOT(~)  AC
+    grid.attach(&hex_btns[2], 0, 1, 1, 1); // C
+    grid.attach(&hex_btns[3], 1, 1, 1, 1); // D
+    grid.attach(&prog_op_btn(ui, "XOR", "^", "calc-function"), 2, 1, 1, 1);
+    grid.attach(&prog_op_btn(ui, "NOT", "~", "calc-function"), 3, 1, 1, 1);
+    grid.attach(&ac, 4, 1, 1, 1);
+    // Row 2: E  F  <<  >>  ÷(/)
+    grid.attach(&hex_btns[4], 0, 2, 1, 1); // E
+    grid.attach(&hex_btns[5], 1, 2, 1, 1); // F
+    grid.attach(&prog_op_btn(ui, "<<", "<<", "calc-function"), 2, 2, 1, 1);
+    grid.attach(&prog_op_btn(ui, ">>", ">>", "calc-function"), 3, 2, 1, 1);
+    grid.attach(&prog_op_btn(ui, "\u{00F7}", "/", "calc-operator"), 4, 2, 1, 1);
+    // Row 3: 7 8 9 ( ×(*)
+    grid.attach(&digit_btns[7], 0, 3, 1, 1);
+    grid.attach(&digit_btns[8], 1, 3, 1, 1);
+    grid.attach(&digit_btns[9], 2, 3, 1, 1);
+    grid.attach(&prog_op_btn(ui, "(", "(", "calc-operator"), 3, 3, 1, 1);
+    grid.attach(&prog_op_btn(ui, "\u{00D7}", "*", "calc-operator"), 4, 3, 1, 1);
+    // Row 4: 4 5 6 ) −(-)
+    grid.attach(&digit_btns[4], 0, 4, 1, 1);
+    grid.attach(&digit_btns[5], 1, 4, 1, 1);
+    grid.attach(&digit_btns[6], 2, 4, 1, 1);
+    grid.attach(&prog_op_btn(ui, ")", ")", "calc-operator"), 3, 4, 1, 1);
+    grid.attach(&prog_op_btn(ui, "\u{2212}", "-", "calc-operator"), 4, 4, 1, 1);
+    // Row 5: 1 2 3 mod(%) +(+)
+    grid.attach(&digit_btns[1], 0, 5, 1, 1);
+    grid.attach(&digit_btns[2], 1, 5, 1, 1);
+    grid.attach(&digit_btns[3], 2, 5, 1, 1);
+    grid.attach(&prog_op_btn(ui, "mod", "%", "calc-operator"), 3, 5, 1, 1);
+    grid.attach(&prog_op_btn(ui, "+", "+", "calc-operator"), 4, 5, 1, 1);
+    // Row 6: 0 00 (blank) (blank) =
+    grid.attach(&digit_btns[0], 0, 6, 1, 1);
+    // "00": press '0' twice.
+    let zz = gtk::Button::builder()
+        .label("00")
+        .css_classes(["calc-btn", "calc-btn-prog", "calc-digit"])
+        .hexpand(true)
+        .vexpand(false)
+        .can_focus(false)
+        .build();
+    zz.connect_clicked(clone!(
+        #[weak]
+        ui,
+        #[upgrade_or_default]
+        move |_| {
+            {
+                let mut st = ui.prog.borrow_mut();
+                st.press_digit('0');
+                st.press_digit('0');
+            }
+            ui.render_prog();
+        }
+    ));
+    grid.attach(&zz, 1, 6, 1, 1);
+    grid.attach(&equals, 4, 6, 1, 1);
+
+    // Assemble the page: base block (top), controls, expr, keypad (bottom).
+    let page = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(8)
+        .build();
+    page.append(&base_block);
+    page.append(&controls);
+    page.append(&expr_row);
+    let keypad_wrap = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .valign(gtk::Align::End)
+        .build();
+    keypad_wrap.append(&grid);
+    let keypad_scroller = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .vexpand(true)
+        .child(&keypad_wrap)
+        .build();
+    page.append(&keypad_scroller);
+
+    // Initialize width + signed toggle active state from settings (guarded via
+    // the toggled handlers' cur==want checks; render_prog also syncs later).
+    let init_w = settings::prog_width();
+    let init_idx = match init_w {
+        Width::W8 => 0,
+        Width::W16 => 1,
+        Width::W32 => 2,
+        Width::W64 => 3,
+    };
+    if let Some(btn) = width_btns.get(init_idx) {
+        if !btn.is_active() {
+            btn.set_active(true);
+        }
+    }
+    let init_signed = settings::prog_signed();
+    if signed_btn.is_active() != init_signed {
+        signed_btn.set_active(init_signed);
+    }
+
+    let clamp = adw::Clamp::builder()
+        .maximum_size(480)
+        .child(&page)
+        .build();
+    clamp.upcast::<gtk::Widget>()
 }
 
 /// Install the window-level hardware-keyboard controller. Keys map to the same
@@ -1658,56 +2539,167 @@ fn install_key_controller(ui: &Ui, window: &adw::ApplicationWindow) {
                 return glib::Propagation::Proceed;
             }
 
-            let mut handled = true;
-            {
-                let mut calc = ui.calc.borrow_mut();
-                if let Some(ch) = keyval.to_unicode() {
-                    match ch {
-                        '0'..='9' => calc.press_digit(ch),
-                        '.' | ',' => calc.press_dot(),
-                        '+' => calc.press_op(Op::Add),
-                        '-' => calc.press_op(Op::Sub),
-                        '*' => calc.press_op(Op::Mul),
-                        '/' => calc.press_op(Op::Div),
-                        '^' => calc.press_power(),
-                        '%' => calc.press_percent(),
-                        '!' => calc.press_factorial(),
-                        '(' | ')' => calc.press_paren(),
-                        '=' => {
-                            drop(calc);
-                            do_equals(&ui);
-                            return glib::Propagation::Stop;
+            let child = ui.content_stack.visible_child_name();
+            match child.as_deref() {
+                Some("programmer") => {
+                    let mut handled = true;
+                    {
+                        let mut st = ui.prog.borrow_mut();
+                        if let Some(ch) = keyval.to_unicode() {
+                            let up = ch.to_ascii_uppercase();
+                            match up {
+                                '0'..='9' => st.press_digit(ch),
+                                'A'..='F' => st.press_digit(up),
+                                '&' => st.press_op("&"),
+                                '|' => st.press_op("|"),
+                                '^' => st.press_op("^"),
+                                '~' => st.press_op("~"),
+                                '+' => st.press_op("+"),
+                                '-' => st.press_op("-"),
+                                '*' => st.press_op("*"),
+                                '/' => st.press_op("/"),
+                                '%' => st.press_op("%"),
+                                '(' => st.press_op("("),
+                                ')' => st.press_op(")"),
+                                '<' => st.press_op("<<"),
+                                '>' => st.press_op(">>"),
+                                '=' => {
+                                    st.equals();
+                                    drop(st);
+                                    ui.render_prog();
+                                    return glib::Propagation::Stop;
+                                }
+                                _ => handled = false,
+                            }
+                        } else {
+                            handled = false;
                         }
-                        'p' => calc.press_pi(),
-                        's' => calc.press_func(Func::Sin),
-                        'c' => calc.press_func(Func::Cos),
-                        't' => calc.press_func(Func::Tan),
-                        _ => handled = false,
                     }
-                } else {
-                    handled = false;
+                    if !handled {
+                        match keyval {
+                            gdk::Key::Return | gdk::Key::KP_Enter => {
+                                {
+                                    let mut st = ui.prog.borrow_mut();
+                                    st.equals();
+                                }
+                                ui.render_prog();
+                                return glib::Propagation::Stop;
+                            }
+                            gdk::Key::BackSpace => {
+                                let mut st = ui.prog.borrow_mut();
+                                st.backspace();
+                            }
+                            gdk::Key::Escape | gdk::Key::Delete => {
+                                let mut st = ui.prog.borrow_mut();
+                                st.clear();
+                            }
+                            _ => return glib::Propagation::Proceed,
+                        }
+                    }
+                    ui.render_prog();
+                    return glib::Propagation::Stop;
                 }
-            }
-
-            if !handled {
-                // Named keys (Enter/Backspace/Escape/Delete) have no unicode.
-                match keyval {
-                    gdk::Key::Return | gdk::Key::KP_Enter => {
-                        do_equals(&ui);
-                        return glib::Propagation::Stop;
+                Some("converter") => {
+                    if let Some(ch) = keyval.to_unicode() {
+                        match ch {
+                            '0'..='9' => {
+                                {
+                                    let mut st = ui.converter.borrow_mut();
+                                    if st.input == "0" {
+                                        st.input.clear();
+                                    }
+                                    st.input.push(ch);
+                                }
+                                converter_refresh(&ui, &ui.conv_top_label, &ui.conv_bottom_label);
+                                return glib::Propagation::Stop;
+                            }
+                            '.' | ',' => {
+                                {
+                                    let mut st = ui.converter.borrow_mut();
+                                    if st.input.is_empty() {
+                                        st.input.push_str("0.");
+                                    } else if !st.input.contains('.') {
+                                        st.input.push('.');
+                                    }
+                                }
+                                converter_refresh(&ui, &ui.conv_top_label, &ui.conv_bottom_label);
+                                return glib::Propagation::Stop;
+                            }
+                            _ => {}
+                        }
                     }
-                    gdk::Key::BackSpace => {
-                        ui.calc.borrow_mut().backspace();
+                    match keyval {
+                        gdk::Key::BackSpace => {
+                            {
+                                ui.converter.borrow_mut().input.pop();
+                            }
+                            converter_refresh(&ui, &ui.conv_top_label, &ui.conv_bottom_label);
+                            glib::Propagation::Stop
+                        }
+                        gdk::Key::Escape | gdk::Key::Delete => {
+                            {
+                                ui.converter.borrow_mut().input.clear();
+                            }
+                            converter_refresh(&ui, &ui.conv_top_label, &ui.conv_bottom_label);
+                            glib::Propagation::Stop
+                        }
+                        _ => glib::Propagation::Proceed,
                     }
-                    gdk::Key::Escape | gdk::Key::Delete => {
-                        ui.calc.borrow_mut().clear();
-                    }
-                    _ => return glib::Propagation::Proceed,
                 }
-            }
+                Some("calculator") => {
+                    let mut handled = true;
+                    {
+                        let mut calc = ui.calc.borrow_mut();
+                        if let Some(ch) = keyval.to_unicode() {
+                            match ch {
+                                '0'..='9' => calc.press_digit(ch),
+                                '.' | ',' => calc.press_dot(),
+                                '+' => calc.press_op(Op::Add),
+                                '-' => calc.press_op(Op::Sub),
+                                '*' => calc.press_op(Op::Mul),
+                                '/' => calc.press_op(Op::Div),
+                                '^' => calc.press_power(),
+                                '%' => calc.press_percent(),
+                                '!' => calc.press_factorial(),
+                                '(' | ')' => calc.press_paren(),
+                                '=' => {
+                                    drop(calc);
+                                    do_equals(&ui);
+                                    return glib::Propagation::Stop;
+                                }
+                                'p' => calc.press_pi(),
+                                's' => calc.press_func(Func::Sin),
+                                'c' => calc.press_func(Func::Cos),
+                                't' => calc.press_func(Func::Tan),
+                                _ => handled = false,
+                            }
+                        } else {
+                            handled = false;
+                        }
+                    }
 
-            ui.render();
-            glib::Propagation::Stop
+                    if !handled {
+                        // Named keys (Enter/Backspace/Escape/Delete) have no unicode.
+                        match keyval {
+                            gdk::Key::Return | gdk::Key::KP_Enter => {
+                                do_equals(&ui);
+                                return glib::Propagation::Stop;
+                            }
+                            gdk::Key::BackSpace => {
+                                ui.calc.borrow_mut().backspace();
+                            }
+                            gdk::Key::Escape | gdk::Key::Delete => {
+                                ui.calc.borrow_mut().clear();
+                            }
+                            _ => return glib::Propagation::Proceed,
+                        }
+                    }
+
+                    ui.render();
+                    glib::Propagation::Stop
+                }
+                _ => glib::Propagation::Proceed,
+            }
         }
     ));
     window.add_controller(controller);

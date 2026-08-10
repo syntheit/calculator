@@ -72,6 +72,12 @@ pub const APP_CSS: &str = "
     filter: brightness(0.94);
 }
 
+/* Programmer keypad keys: shorter than the 62px basic keys so all 7 rows
+   fit a 432×916 viewport without clipping the bottom (=) row. */
+.calc-btn-prog {
+    min-height: 52px;
+}
+
 /* Digits & the decimal point: subtle raised neutral. */
 .calc-digit {
     background-color: alpha(@window_fg_color, 0.06);
@@ -182,6 +188,36 @@ pub const APP_CSS: &str = "
     min-height: 0;
     min-width: 0;
     font-size: 1.0em;
+}
+
+/* ─── Programmer mode ─────────────────────────────────────────────────── */
+
+/* Base rows: flat, with the active base row getting an accent-tinted bg. */
+.calc-prog-row {
+    padding: 4px 8px;
+    border-radius: 8px;
+    background: none;
+}
+.calc-prog-row.calc-primary {
+    background-color: alpha(@accent_bg_color, 0.18);
+}
+.calc-prog-baselabel {
+    font-size: 0.85em;
+    font-weight: bold;
+    opacity: 0.7;
+    color: @accent_color;
+}
+.calc-prog-value {
+    font-size: 1.5em;
+    font-weight: 400;
+    font-family: monospace;
+    color: @window_fg_color;
+}
+.calc-prog-value.calc-error {
+    color: @error_color;
+}
+.calc-disabled {
+    opacity: 0.35;
 }
 ";
 

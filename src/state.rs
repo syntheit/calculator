@@ -86,6 +86,9 @@ pub enum Func {
     Tan,
     Ln,
     Log,
+    Sinh,
+    Cosh,
+    Tanh,
 }
 
 /// The three top-level modes of the display.
@@ -355,9 +358,78 @@ impl Calculator {
         self.buf.push(Chunk::Sym("e"));
     }
 
-    /// Append a function-open (`sin(` …). With [`inv`](Self::inv) on, inserts the
+    /// Append `abs(` (absolute value). Opens a paren; smart-paren/auto-close
+    /// handles the rest.
+    pub fn press_abs(&mut self) {
+        self.begin_fresh_if_needed();
+        self.buf.push(Chunk::Func("abs("));
+    }
+
+    /// Append `log2(` (base-2 logarithm). Opens a paren; auto-close handles the
+    /// rest.
+    pub fn press_log2(&mut self) {
+        self.begin_fresh_if_needed();
+        self.buf.push(Chunk::Func("log2("));
+    }
+
+    /// Reciprocal: append `^-1` to the current value (postfix), so `5` becomes
+    /// `5^-1` = 0.2. Behaves like the `x²` inverse path of [`press_sqrt`].
+    pub fn press_reciprocal(&mut self) {
+        if self.state == CalcState::Result {
+            self.seed_with_last_result();
+        } else if self.state == CalcState::Error {
+            self.reset_input();
+        }
+        if self.last_ends_value() {
+            self.buf.push(Chunk::Sym("^"));
+            self.buf.push(Chunk::Sym("-"));
+            self.buf.push(Chunk::Number("1".to_string()));
+        }
+    }
+
+    /// Toggle the sign of the current trailing number operand. If the buffer
+    /// ends in a `Number` preceded by a unary minus, remove that minus;
+    /// otherwise insert a `-` before the number. When there is nothing to
+    /// negate, insert a leading unary minus for the next number typed.
+    pub fn press_negate(&mut self) {
+        if self.state == CalcState::Result {
+            self.seed_with_last_result();
+        } else if self.state == CalcState::Error {
+            self.reset_input();
+        }
+        let n = self.buf.len();
+        if n == 0 {
+            self.buf.push(Chunk::Sym("-"));
+            return;
+        }
+        // Only act when the buffer ends in a Number (an operand to negate).
+        if !matches!(self.buf.last(), Some(Chunk::Number(_))) {
+            self.buf.push(Chunk::Sym("-"));
+            return;
+        }
+        // The operand is the single trailing Number chunk at index n-1.
+        let op_start = n - 1;
+        // Is there a unary minus directly before it that we should toggle off?
+        let has_unary_minus = op_start > 0
+            && matches!(self.buf.get(op_start - 1), Some(Chunk::Sym("-")))
+            && (op_start == 1
+                || matches!(
+                    self.buf.get(op_start - 2),
+                    Some(Chunk::Sym(s)) if matches!(*s, "+" | "-" | "*" | "/" | "^" | "(")
+                )
+                || matches!(self.buf.get(op_start - 2), Some(Chunk::Func(_))));
+        if has_unary_minus {
+            self.buf.remove(op_start - 1);
+        } else {
+            self.buf.insert(op_start, Chunk::Sym("-"));
+        }
+    }
+
+    /// Append a function-open (`sin(` …), including the hyperbolic trio
+    /// (`sinh(`/`cosh(`/`tanh(`). With [`inv`](Self::inv) on, inserts the
     /// inverse form: Sin→`asin(`, Cos→`acos(`, Tan→`atan(`, Ln→`exp(`,
-    /// Log→`10^` (a power of ten, not a function-open).
+    /// Log→`10^` (a power of ten, not a function-open), and the hyperbolic
+    /// inverses Sinh→`asinh(`, Cosh→`acosh(`, Tanh→`atanh(`.
     pub fn press_func(&mut self, f: Func) {
         self.begin_fresh_if_needed();
         if self.inv {
@@ -372,6 +444,9 @@ impl Calculator {
                     self.buf.push(Chunk::Number("10".to_string()));
                     self.buf.push(Chunk::Sym("^"));
                 }
+                Func::Sinh => self.buf.push(Chunk::Func("asinh(")),
+                Func::Cosh => self.buf.push(Chunk::Func("acosh(")),
+                Func::Tanh => self.buf.push(Chunk::Func("atanh(")),
             }
             return;
         }
@@ -381,6 +456,9 @@ impl Calculator {
             Func::Tan => "tan(",
             Func::Ln => "ln(",
             Func::Log => "log(",
+            Func::Sinh => "sinh(",
+            Func::Cosh => "cosh(",
+            Func::Tanh => "tanh(",
         };
         self.buf.push(Chunk::Func(name));
     }
@@ -580,11 +658,18 @@ impl Calculator {
 
     // ---- readout -----------------------------------------------------------
 
-    /// The buffer pretty-printed for the display: `×` for `*`, `÷` for `/`,
-    /// `−` (U+2212) for `-`, digit-grouped numeric literals, function names, and
-    /// `√ π e ^ ! %` verbatim.
+    /// The buffer pretty-printed for the display using en-US separators
+    /// (group ',', decimal '.'). Kept for callers/tests that don't thread a
+    /// locale.
     pub fn display_expression(&self) -> String {
-        pretty_string(&self.buf)
+        self.display_expression_with(',', '.')
+    }
+
+    /// The buffer pretty-printed for display with explicit group + decimal
+    /// separators. The canonical buffer is untouched (still ASCII '.'/digits);
+    /// only the returned display string swaps separators.
+    pub fn display_expression_with(&self, group: char, decimal: char) -> String {
+        pretty_string_with(&self.buf, group, decimal)
     }
 
     /// The instant ("live") result, or `None`.
@@ -615,6 +700,27 @@ impl Calculator {
         let canonical = canonical_string(&chunks);
         let value = engine::evaluate(&canonical, self.angle).ok()?;
         Some(engine::format_result(value))
+    }
+
+    /// The live ("instant") result as a raw f64, applying the same
+    /// "interesting op" gate as [`live_result`]. `None` when there is no
+    /// meaningful preview. Lets the UI format with a locale.
+    pub fn live_value(&self) -> Option<f64> {
+        if self.buf.is_empty() {
+            return None;
+        }
+        let mut chunks = self.buf.clone();
+        while matches!(chunks.last(), Some(Chunk::Sym(s)) if matches!(*s, "+" | "-" | "*" | "/" | "^")) {
+            chunks.pop();
+        }
+        if chunks.is_empty() {
+            return None;
+        }
+        if !has_interesting_op(&chunks) {
+            return None;
+        }
+        let canonical = canonical_string(&chunks);
+        engine::evaluate(&canonical, self.angle).ok()
     }
 
     /// The current display mode.
@@ -696,11 +802,20 @@ fn canonical_string(chunks: &[Chunk]) -> String {
 
 /// Build the pretty (display) string from chunks: ASCII operators become their
 /// Unicode display glyphs and numeric literals are thousands-grouped.
+///
+/// Thin en-US wrapper (group ',', decimal '.') kept for `equals()` history
+/// entries and other callers that don't thread a locale.
 fn pretty_string(chunks: &[Chunk]) -> String {
+    pretty_string_with(chunks, ',', '.')
+}
+
+/// Build the pretty display string with explicit group + decimal separators.
+/// The canonical buffer is untouched; only this output localizes separators.
+fn pretty_string_with(chunks: &[Chunk], group: char, decimal: char) -> String {
     let mut s = String::new();
     for c in chunks {
         match c {
-            Chunk::Number(n) => s.push_str(&group_number_literal(n)),
+            Chunk::Number(n) => s.push_str(&group_number_literal_with(n, group, decimal)),
             Chunk::Sym(sym) => s.push_str(pretty_sym(sym)),
             Chunk::Func(f) => s.push_str(f),
         }
@@ -718,26 +833,35 @@ fn pretty_sym(sym: &str) -> &str {
     }
 }
 
-/// Group the integer part of a numeric literal with commas for display, leaving
-/// any fractional part and a trailing dot untouched (`"2024" → "2,024"`,
-/// `"1234.5" → "1,234.5"`, `"12." → "12."`).
-fn group_number_literal(n: &str) -> String {
-    let (int_part, rest) = match n.find('.') {
-        Some(dot) => (&n[..dot], &n[dot..]),
+/// Group the integer part of a numeric literal with `group`, and render the
+/// decimal point (and any fractional part) using `decimal`. The input `n` is
+/// the CANONICAL literal (ASCII '.'); only the output is localized.
+fn group_number_literal_with(n: &str, group: char, decimal: char) -> String {
+    let (int_part, frac_with_dot) = match n.find('.') {
+        Some(dot) => (&n[..dot], &n[dot..]), // frac_with_dot starts with '.'
         None => (n, ""),
     };
+    // Localize the fractional part's leading '.' to `decimal`.
+    let frac_localized = if frac_with_dot.is_empty() {
+        String::new()
+    } else {
+        let mut f = String::new();
+        f.push(decimal);
+        f.push_str(&frac_with_dot[1..]); // everything after the '.'
+        f
+    };
     if int_part.len() <= 3 {
-        return n.to_string();
+        return format!("{}{}", int_part, frac_localized);
     }
     let len = int_part.len();
-    let mut grouped = String::with_capacity(len + len / 3 + rest.len());
+    let mut grouped = String::with_capacity(len + len / 3 + frac_localized.len());
     for (idx, ch) in int_part.chars().enumerate() {
         if idx > 0 && (len - idx) % 3 == 0 {
-            grouped.push(',');
+            grouped.push(group);
         }
         grouped.push(ch);
     }
-    grouped.push_str(rest);
+    grouped.push_str(&frac_localized);
     grouped
 }
 
@@ -1160,5 +1284,56 @@ mod tests {
         calc.insert_result("-625");
         let v = calc.current_value().expect("bare number should evaluate");
         assert!((v - (-625.0)).abs() < 1e-9, "expected -625, got {v}");
+    }
+
+    // ---- hyperbolic + new sci functions -----------------------------------
+
+    #[test]
+    fn func_sinh_display() {
+        let mut calc = c();
+        calc.press_func(Func::Sinh);
+        assert_eq!(calc.display_expression(), "sinh(");
+    }
+
+    #[test]
+    fn inv_func_sinh_is_asinh() {
+        let mut calc = c();
+        calc.toggle_inv();
+        calc.press_func(Func::Sinh);
+        assert_eq!(calc.display_expression(), "asinh(");
+    }
+
+    #[test]
+    fn abs_of_negative() {
+        let mut calc = c();
+        calc.press_abs(); // "abs("
+        type_str(&mut calc, "-5"); // abs(-5  → auto-closes to abs(-5)
+        assert_eq!(calc.live_result(), Some("5".to_string()));
+    }
+
+    #[test]
+    fn log2_of_eight() {
+        let mut calc = c();
+        calc.press_log2(); // "log2("
+        calc.press_digit('8'); // log2(8 → auto-closes
+        assert_eq!(calc.live_result(), Some("3".to_string()));
+    }
+
+    #[test]
+    fn reciprocal_of_four() {
+        let mut calc = c();
+        type_str(&mut calc, "4");
+        calc.press_reciprocal(); // 4^-1
+        assert_eq!(calc.live_result(), Some("0.25".to_string()));
+    }
+
+    #[test]
+    fn negate_toggles_trailing_number() {
+        let mut calc = c();
+        type_str(&mut calc, "5");
+        calc.press_negate();
+        assert_eq!(calc.display_expression(), "\u{2212}5");
+        calc.press_negate();
+        assert_eq!(calc.display_expression(), "5");
     }
 }

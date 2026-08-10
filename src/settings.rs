@@ -10,6 +10,8 @@ use gtk::gio;
 use gtk::prelude::*;
 
 use crate::engine::AngleUnit;
+use crate::engine::format::NumLocale;
+use crate::programmer::{Base, Width};
 
 /// GSettings keys — kept in one place so they stay in sync with the gschema.
 const KEY_WIDTH: &str = "window-width";
@@ -18,6 +20,11 @@ const KEY_MAXIMIZED: &str = "window-maximized";
 const KEY_ANGLE: &str = "angle-mode";
 const KEY_INVERSE: &str = "inverse-mode";
 const KEY_CONVERTER_CATEGORY: &str = "converter-category";
+const KEY_NUMBER_FORMAT: &str = "number-format";
+const KEY_ACTIVE_MODE: &str = "active-mode";
+const KEY_PROG_BASE: &str = "prog-base";
+const KEY_PROG_BIT_WIDTH: &str = "prog-bit-width";
+const KEY_PROG_SIGNED: &str = "prog-signed";
 
 /// Open the settings store, or `None` when the schema isn't installed.
 ///
@@ -112,5 +119,104 @@ pub fn converter_category() -> crate::convert::Category {
 pub fn set_converter_category(cat: crate::convert::Category) {
     if let Some(s) = settings() {
         let _ = s.set_string(KEY_CONVERTER_CATEGORY, &cat.name().to_lowercase());
+    }
+}
+
+/// The saved number-format locale, defaulting to en-US.
+pub fn number_format() -> NumLocale {
+    let raw = settings()
+        .map(|s| s.string(KEY_NUMBER_FORMAT).to_string())
+        .unwrap_or_else(|| "en-us".to_string());
+    if raw == "es-ar" {
+        NumLocale::EsAr
+    } else {
+        NumLocale::EnUs
+    }
+}
+
+/// Persist the number-format locale (best-effort).
+pub fn set_number_format(locale: NumLocale) {
+    if let Some(s) = settings() {
+        let value = match locale {
+            NumLocale::EnUs => "en-us",
+            NumLocale::EsAr => "es-ar",
+        };
+        let _ = s.set_string(KEY_NUMBER_FORMAT, value);
+    }
+}
+
+/// The saved active mode, defaulting to "calculator".
+pub fn active_mode() -> String {
+    settings()
+        .map(|s| s.string(KEY_ACTIVE_MODE).to_string())
+        .unwrap_or_else(|| "calculator".to_string())
+}
+
+/// Persist the active mode (best-effort).
+pub fn set_active_mode(mode: &str) {
+    if let Some(s) = settings() {
+        let _ = s.set_string(KEY_ACTIVE_MODE, mode);
+    }
+}
+
+/// The saved programmer-mode base, defaulting to decimal.
+pub fn prog_base() -> Base {
+    let raw = settings()
+        .map(|s| s.string(KEY_PROG_BASE).to_string())
+        .unwrap_or_else(|| "dec".to_string());
+    match raw.as_str() {
+        "hex" => Base::Hex,
+        "oct" => Base::Oct,
+        "bin" => Base::Bin,
+        _ => Base::Dec,
+    }
+}
+
+/// Persist the programmer-mode base (best-effort).
+pub fn set_prog_base(base: Base) {
+    if let Some(s) = settings() {
+        let value = match base {
+            Base::Hex => "hex",
+            Base::Dec => "dec",
+            Base::Oct => "oct",
+            Base::Bin => "bin",
+        };
+        let _ = s.set_string(KEY_PROG_BASE, value);
+    }
+}
+
+/// The saved programmer-mode bit width, defaulting to 32.
+pub fn prog_width() -> Width {
+    let raw = settings().map(|s| s.int(KEY_PROG_BIT_WIDTH)).unwrap_or(32);
+    match raw {
+        8 => Width::W8,
+        16 => Width::W16,
+        64 => Width::W64,
+        _ => Width::W32,
+    }
+}
+
+/// Persist the programmer-mode bit width (best-effort).
+pub fn set_prog_width(width: Width) {
+    if let Some(s) = settings() {
+        let value = match width {
+            Width::W8 => 8,
+            Width::W16 => 16,
+            Width::W32 => 32,
+            Width::W64 => 64,
+        };
+        let _ = s.set_int(KEY_PROG_BIT_WIDTH, value);
+    }
+}
+
+/// The saved programmer-mode signedness, defaulting to signed (true).
+pub fn prog_signed() -> bool {
+    settings().map(|s| s.boolean(KEY_PROG_SIGNED)).unwrap_or(true)
+}
+
+/// Persist the programmer-mode signedness (best-effort).
+pub fn set_prog_signed(v: bool) {
+    if let Some(s) = settings() {
+        let _ = s.set_boolean(KEY_PROG_SIGNED, v);
     }
 }

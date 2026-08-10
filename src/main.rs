@@ -10,6 +10,8 @@ mod app;
 mod convert;
 mod engine;
 mod history;
+mod programmer;
+mod prog_state;
 mod settings;
 mod state;
 mod ui;

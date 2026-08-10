@@ -13,6 +13,7 @@
 //! atom        := NUMBER | π | e
 //!              | '(' add ')'               // ')' may be missing → auto-close
 //!              | FUNC '(' add ')'          // ditto
+//!              | FUNC2 '(' add ',' add ')' // two-arg call; comma required
 //!              | '√' unary                 // prefix sqrt over a factor
 //! ```
 //!
@@ -33,7 +34,7 @@
 //!   genuinely present is still consumed. This yields `cos(π` = `cos(π)` and
 //!   `2*(3+4` = `2*(3+4)`.
 
-use crate::engine::lexer::{FuncName, Token};
+use crate::engine::lexer::{Func2Name, FuncName, Token};
 use crate::engine::EvalError;
 use std::cell::Cell;
 
@@ -58,6 +59,8 @@ pub enum Expr {
     Percent(Box<Expr>),
     /// A named function call.
     Call(FuncName, Box<Expr>),
+    /// A named two-argument function call (e.g. `nPr(n, r)`, `root(y, x)`).
+    Call2(Func2Name, Box<Expr>, Box<Expr>),
     /// An explicitly parenthesised sub-expression. Kept as a distinct node
     /// (rather than collapsed) so the evaluator can tell `(10)%` from `10%`:
     /// parenthesising a percent term defeats Google's additive percent rule.
@@ -289,6 +292,25 @@ impl<'a> Parser<'a> {
                 self.expect_rparen()?;
                 Ok(Expr::Call(f, Box::new(arg)))
             }
+            Some(Token::Func2(f)) => {
+                let f = *f;
+                self.bump();
+                // Like the one-arg form, tolerate a missing `(` defensively.
+                if matches!(self.peek(), Some(Token::LParen)) {
+                    self.bump();
+                }
+                let a = self.parse_add()?;
+                // The comma between the two args is REQUIRED; its absence is a
+                // syntax error (unlike the optional paren / auto-close).
+                if matches!(self.peek(), Some(Token::Comma)) {
+                    self.bump();
+                } else {
+                    return Err(EvalError::Syntax);
+                }
+                let b = self.parse_add()?;
+                self.expect_rparen()?;
+                Ok(Expr::Call2(f, Box::new(a), Box::new(b)))
+            }
             // A trailing binary operator, a stray `)` etc. all land here.
             _ => Err(EvalError::Syntax),
         }
@@ -395,6 +417,26 @@ mod tests {
         // cos(π  parses to cos(π)
         let e = ast("cos(\u{03C0}");
         assert_eq!(e, Expr::Call(FuncName::Cos, Box::new(Expr::Pi)));
+    }
+
+    // ---- Two-arg calls ----
+
+    #[test]
+    fn two_arg_call_shape() {
+        let e = ast("nPr(5,2)");
+        assert_eq!(
+            e,
+            Expr::Call2(
+                Func2Name::Npr,
+                Box::new(Expr::Num(5.0)),
+                Box::new(Expr::Num(2.0))
+            )
+        );
+    }
+
+    #[test]
+    fn two_arg_missing_comma_is_syntax_error() {
+        assert_eq!(parse(&tokenize("nPr(5)").unwrap()), Err(EvalError::Syntax));
     }
 
     #[test]

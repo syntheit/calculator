@@ -14,10 +14,13 @@
 //!   side*": `100+10% = 110`, `100−10% = 90`. In every other position it means
 //!   plain `× 1/100`: `50% = 0.5`, `100×10% = 10`, `100÷50% = 200`,
 //!   `10%+5 = 5.1`, `100+(10)% = 100.1`.
+//!
+//! * **Angle-independent functions.** The hyperbolic functions plus `abs`,
+//!   `log2`, and `cbrt` ignore the angle unit and operate on the raw argument.
 
 use crate::engine::parser::{BinOp, Expr};
 use crate::engine::EvalError;
-use crate::engine::lexer::FuncName;
+use crate::engine::lexer::{Func2Name, FuncName};
 
 /// Whether trigonometric arguments/results are in radians or degrees.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,6 +66,7 @@ fn eval_node(expr: &Expr, angle: AngleUnit) -> Result<f64, EvalError> {
         // A bare percent (not caught by the additive special-case) is × 1/100.
         Expr::Percent(inner) => Ok(eval_node(inner, angle)? / 100.0),
         Expr::Call(f, arg) => eval_call(*f, eval_node(arg, angle)?, angle),
+        Expr::Call2(f, a, b) => eval_call2(*f, eval_node(a, angle)?, eval_node(b, angle)?, angle),
         Expr::Bin(op, lhs, rhs) => eval_bin(*op, lhs, rhs, angle),
     }
 }
@@ -159,6 +163,108 @@ fn eval_call(f: FuncName, x: f64, angle: AngleUnit) -> Result<f64, EvalError> {
             Ok(x.log10())
         }
         FuncName::Exp => Ok(x.exp()),
+        FuncName::Sinh => Ok(x.sinh()),
+        FuncName::Cosh => Ok(x.cosh()),
+        FuncName::Tanh => Ok(x.tanh()),
+        FuncName::Asinh => Ok(x.asinh()),
+        FuncName::Acosh => {
+            if x < 1.0 {
+                return Err(EvalError::Domain);
+            }
+            Ok(x.acosh())
+        }
+        FuncName::Atanh => {
+            if !(-1.0..1.0).contains(&x) {
+                return Err(EvalError::Domain);
+            }
+            Ok(x.atanh())
+        }
+        FuncName::Abs => Ok(x.abs()),
+        FuncName::Log2 => {
+            if x <= 0.0 {
+                return Err(EvalError::Domain);
+            }
+            Ok(x.log2())
+        }
+        FuncName::Cbrt => Ok(x.cbrt()),
+    }
+}
+
+/// Evaluate a two-argument named function. These are all angle-independent, so
+/// `_angle` is unused.
+fn eval_call2(f: Func2Name, a: f64, b: f64, _angle: AngleUnit) -> Result<f64, EvalError> {
+    match f {
+        Func2Name::Npr => {
+            let n = a;
+            let r = b;
+            if n < 0.0 || n.fract() != 0.0 || r < 0.0 || r.fract() != 0.0 || r > n {
+                return Err(EvalError::Domain);
+            }
+            // nPr(n, r) = product over i in 0..r of (n - i). Empty product = 1.
+            let r_count = r as u64;
+            let mut acc = 1.0f64;
+            for i in 0..r_count {
+                acc *= n - i as f64;
+            }
+            let result = acc.round();
+            if result.is_infinite() || result.is_nan() {
+                return Err(EvalError::Overflow);
+            }
+            Ok(result)
+        }
+        Func2Name::Ncr => {
+            let n = a;
+            let r = b;
+            if n < 0.0 || n.fract() != 0.0 || r < 0.0 || r.fract() != 0.0 || r > n {
+                return Err(EvalError::Domain);
+            }
+            // nCr(n, r): use the smaller of r and n-r, and divide inside the loop
+            // to keep magnitudes bounded and near integer-exact.
+            let r_count = r as u64;
+            let n_count = n as u64;
+            let k = r_count.min(n_count - r_count);
+            let mut acc = 1.0f64;
+            for i in 1..=k {
+                acc = acc * (n - k as f64 + i as f64) / i as f64;
+            }
+            let result = acc.round();
+            if result.is_infinite() || result.is_nan() {
+                return Err(EvalError::Overflow);
+            }
+            Ok(result)
+        }
+        Func2Name::Root => {
+            // `a` is the degree, `b` the radicand.
+            if a == 0.0 {
+                return Err(EvalError::Domain);
+            }
+            if b >= 0.0 {
+                let r = b.powf(1.0 / a);
+                if r.is_nan() {
+                    Err(EvalError::Domain)
+                } else {
+                    Ok(r)
+                }
+            } else if a.fract() == 0.0 && (a as i64) % 2 != 0 {
+                // Odd integer degree of a negative radicand has a real root.
+                let r = -(b.abs().powf(1.0 / a));
+                if r.is_nan() {
+                    Err(EvalError::Domain)
+                } else {
+                    Ok(r)
+                }
+            } else {
+                // Even integer degree, or non-integer degree, of a negative
+                // radicand has no real result.
+                Err(EvalError::Domain)
+            }
+        }
+        Func2Name::Logb => {
+            if a <= 0.0 || a == 1.0 || b <= 0.0 {
+                return Err(EvalError::Domain);
+            }
+            Ok(b.log(a))
+        }
     }
 }
 
@@ -373,5 +479,95 @@ mod tests {
     #[test]
     fn ln_of_zero_is_domain() {
         assert_eq!(ev("ln(0)", AngleUnit::Rad), Err(EvalError::Domain));
+    }
+
+    // ---- hyperbolic --------------------------------------------------------
+    #[test]
+    fn hyperbolic_basic() {
+        assert!(close(ok("sinh(0)"), 0.0));
+        assert!(close(ok("cosh(0)"), 1.0));
+        assert!(close(ok("tanh(0)"), 0.0));
+        assert!(close(ok("sinh(1)"), 1.1752011936438014));
+        assert!(close(ok("asinh(0)"), 0.0));
+        assert!(close(ok("acosh(1)"), 0.0));
+        assert!(close(ok("atanh(0)"), 0.0));
+    }
+
+    #[test]
+    fn hyperbolic_angle_independent() {
+        // sinh must be identical in Deg and Rad.
+        assert_eq!(
+            ev("sinh(1)", AngleUnit::Deg).unwrap(),
+            ev("sinh(1)", AngleUnit::Rad).unwrap()
+        );
+    }
+
+    #[test]
+    fn acosh_below_one_is_domain() {
+        assert_eq!(ev("acosh(0)", AngleUnit::Rad), Err(EvalError::Domain));
+    }
+
+    // ---- abs / log2 / cbrt -------------------------------------------------
+    #[test]
+    fn abs_log2_cbrt() {
+        assert!(close(ok("abs(-5)"), 5.0));
+        assert!(close(ok("log2(8)"), 3.0));
+        assert!(close(ok("log2(1)"), 0.0));
+        assert!(close(ok("cbrt(27)"), 3.0));
+        assert!(close(ok("cbrt(-8)"), -2.0));
+    }
+
+    #[test]
+    fn log2_of_zero_is_domain() {
+        assert_eq!(ev("log2(0)", AngleUnit::Rad), Err(EvalError::Domain));
+    }
+
+    // ---- two-arg functions -------------------------------------------------
+    #[test]
+    fn combinatorics() {
+        assert!(close(ok("nCr(5,2)"), 10.0));
+        assert!(close(ok("nCr(10,3)"), 120.0));
+        assert!(close(ok("nCr(5,5)"), 1.0));
+        assert!(close(ok("nPr(5,2)"), 20.0));
+        assert!(close(ok("nPr(5,0)"), 1.0));
+    }
+
+    #[test]
+    fn combinatorics_domain() {
+        assert_eq!(ev("nCr(2,5)", AngleUnit::Rad), Err(EvalError::Domain));
+    }
+
+    #[test]
+    fn nth_root_and_logb() {
+        assert!(close(ok("root(3,27)"), 3.0));
+        assert!(close(ok("root(2,9)"), 3.0));
+        assert!(close(ok("logb(2,8)"), 3.0));
+        assert!(close(ok("logb(10,1000)"), 3.0));
+    }
+
+    #[test]
+    fn combinatorics_large_no_false_overflow() {
+        // These have tiny results; the old full-factorial impl wrongly hit the
+        // 170! overflow guard. Bounded products must give exact integers.
+        assert!(close(ok("nCr(171,1)"), 171.0));
+        assert!(close(ok("nPr(171,1)"), 171.0));
+        assert!(close(ok("nCr(200,2)"), 19900.0));
+        assert!(close(ok("nPr(200,2)"), 39800.0));
+    }
+
+    #[test]
+    fn combinatorics_exact() {
+        assert!(close(ok("nCr(52,5)"), 2598960.0));
+        assert!(close(ok("nCr(10,3)"), 120.0));
+        assert_eq!(ev("nCr(2,5)", AngleUnit::Rad), Err(EvalError::Domain));
+    }
+
+    #[test]
+    fn odd_root_of_negative() {
+        assert!(close(ok("root(3,-8)"), -2.0));
+        assert!(close(ok("root(5,-32)"), -2.0));
+        assert_eq!(ev("root(2,-4)", AngleUnit::Rad), Err(EvalError::Domain));
+        assert!(close(ok("root(3,27)"), 3.0));
+        assert!(close(ok("root(2,4)"), 2.0));
     }
 }
