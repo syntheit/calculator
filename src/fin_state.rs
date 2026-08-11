@@ -283,13 +283,31 @@ impl FinState {
         self.field_value(idx).parse::<f64>().unwrap_or(0.0)
     }
 
+    /// Parses field `idx` as an *optional* number: empty or partial strings
+    /// (`""`, `"-"`, `"."`, `"-."`) yield `None`; a real number yields `Some(x)`.
+    fn parse_field_opt(&self, idx: usize) -> Option<f64> {
+        self.field_value(idx).parse::<f64>().ok()
+    }
+
+    /// Whether every field of the selected calculation parses to a real number.
+    /// Used to distinguish a still-being-filled form (incomplete) from a
+    /// complete one ready to compute.
+    pub fn is_complete(&self) -> bool {
+        (0..self.selected.fields().len()).all(|i| self.parse_field_opt(i).is_some())
+    }
+
     /// Computes the active calculation from the current fields.
     ///
-    /// Rate fields are entered as a percent (the user types `5` for `5%`), so
-    /// they are divided by `100.0` before being passed to the engine. Empty or
-    /// partial fields contribute `0.0` via [`FinState::parse_field`].
-    pub fn compute(&self) -> Result<f64, FinError> {
-        match self.selected {
+    /// Returns `None` while the form is still **incomplete** (any field empty or
+    /// half-typed), so the UI can show a neutral blank rather than a spurious
+    /// error. Once every field parses, returns `Some(Ok(v))` on success or
+    /// `Some(Err(e))` on a genuine engine error. Rate fields are entered as a
+    /// percent (the user types `5` for `5%`) and divided by `100.0`.
+    pub fn compute(&self) -> Option<Result<f64, FinError>> {
+        if !self.is_complete() {
+            return None;
+        }
+        let r = match self.selected {
             FinCalc::Compound => {
                 let pv = self.parse_field(0);
                 let rate = self.parse_field(1) / 100.0;
@@ -320,7 +338,8 @@ impl FinState {
                 let period = self.parse_field(3);
                 crate::financial::depreciation_syd(cost, salvage, life, period)
             }
-        }
+        };
+        Some(r)
     }
 }
 
@@ -400,7 +419,7 @@ mod tests {
         enter(&mut s, 0, "1000");
         enter(&mut s, 1, "5");
         enter(&mut s, 2, "10");
-        let got = s.compute().unwrap();
+        let got = s.compute().unwrap().unwrap();
         assert!(close(got, 1628.894627, 1e-3), "got {got}");
     }
 
@@ -410,7 +429,7 @@ mod tests {
         enter(&mut s, 0, "10000");
         enter(&mut s, 1, "0.416666667");
         enter(&mut s, 2, "360");
-        let got = s.compute().unwrap();
+        let got = s.compute().unwrap().unwrap();
         assert!(close(got, 53.6822, 0.02), "got {got}");
     }
 
@@ -419,7 +438,7 @@ mod tests {
         let mut s = FinState::new(FinCalc::Margin);
         enter(&mut s, 0, "70");
         enter(&mut s, 1, "30");
-        let got = s.compute().unwrap();
+        let got = s.compute().unwrap().unwrap();
         assert!(close(got, 100.0, 1e-6), "got {got}");
     }
 
@@ -430,7 +449,7 @@ mod tests {
         enter(&mut s, 1, "100");
         enter(&mut s, 2, "5");
         enter(&mut s, 3, "1");
-        let got = s.compute().unwrap();
+        let got = s.compute().unwrap().unwrap();
         assert!(close(got, 300.0, 1e-6), "got {got}");
     }
 
@@ -445,5 +464,39 @@ mod tests {
             assert_eq!(s.field_value(i), "");
         }
         assert_eq!(s.active(), 0);
+    }
+
+    #[test]
+    fn fresh_loan_is_incomplete() {
+        let s = FinState::new(FinCalc::Loan);
+        assert!(s.compute().is_none());
+    }
+
+    #[test]
+    fn fresh_depreciation_is_incomplete() {
+        let s = FinState::new(FinCalc::Depreciation);
+        assert!(s.compute().is_none());
+    }
+
+    #[test]
+    fn lone_minus_is_incomplete() {
+        let mut s = FinState::new(FinCalc::Loan);
+        enter(&mut s, 0, "10000");
+        enter(&mut s, 1, "5");
+        // Field 2 holds only "-": still partial → incomplete.
+        s.set_active(2);
+        s.press_negate();
+        assert_eq!(s.field_value(2), "-");
+        assert!(s.compute().is_none());
+    }
+
+    #[test]
+    fn complete_loan_computes() {
+        let mut s = FinState::new(FinCalc::Loan);
+        enter(&mut s, 0, "10000");
+        enter(&mut s, 1, "0.416666667");
+        enter(&mut s, 2, "360");
+        let got = s.compute().unwrap().unwrap();
+        assert!(close(got, 53.6822, 0.02), "got {got}");
     }
 }

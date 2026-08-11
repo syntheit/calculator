@@ -178,13 +178,28 @@ fn group_integer(int_part: &str, group: char) -> String {
     out
 }
 
-/// Scientific notation: `mantissa E exp`, e.g. `1.23E5`. The mantissa is itself
-/// rounded to [`SIG_FIGS`] and trailing-zero-trimmed.
+/// Scientific notation: `mantissa E exp`, e.g. `1.23E5`. The mantissa and
+/// exponent are derived from Rust's own `{:e}` exponent formatter — which never
+/// underflows the way `10f64.powi(exp)` does for subnormals near 1e-323 — rather
+/// than from `log10().floor()` + a `powi` division. The `{:e}` mantissa is
+/// already in `[1, 10)` and its exponent is already the base-10 exponent, so we
+/// simply run the mantissa through the same round / renormalize / trailing-zero
+/// trim pipeline used before; behavior for normal values is unchanged.
 fn format_scientific(value: f64, decimal: char) -> String {
     let negative = value < 0.0;
     let abs = value.abs();
-    let mut exp = abs.log10().floor() as i32;
-    let mantissa = abs / 10f64.powi(exp);
+    // `{:e}` on a positive finite f64 yields e.g. "1.234e-323" / "1e5" and never
+    // underflows; split on the single 'e' to recover mantissa and exponent.
+    let (mantissa_str, exp_str) = format!("{:e}", abs)
+        .split_once('e')
+        .map(|(m, e)| (m.to_string(), e.to_string()))
+        .expect("`{:e}` of a finite f64 always contains one 'e'");
+    let mantissa: f64 = mantissa_str
+        .parse()
+        .expect("`{:e}` mantissa is a valid f64 in [1,10)");
+    let mut exp: i32 = exp_str
+        .parse()
+        .expect("`{:e}` exponent is a valid i32");
     // Round the mantissa to SIG_FIGS and trim.
     let (mut m_rounded, _) = round_sig(mantissa);
     // Rounding can push the mantissa to exactly 10.0 (e.g. 9.9999999999995e17
@@ -323,6 +338,33 @@ mod tests {
         assert_eq!(NumLocale::EnUs.decimal(), '.');
         assert_eq!(NumLocale::EsAr.group(), '.');
         assert_eq!(NumLocale::EsAr.decimal(), ',');
+    }
+
+    #[test]
+    fn subnormal_formats_without_nan() {
+        let s = format_result(1e-323); // a subnormal
+        assert!(!s.contains("NaN"), "got {s}");
+        assert!(s.contains('E'), "got {s}");
+        let parsed = s.replace('E', "e").parse::<f64>();
+        // Extract just the numeric part before asserting finiteness. `s` has no
+        // grouping (scientific path), so the whole string parses after E→e.
+        let n = parsed.expect("should parse");
+        assert!(n.is_finite(), "got {s}");
+        assert!(n > 0.0, "got {s}");
+        // Exponent is very negative (around -323/-324); be lenient.
+        assert!(s.contains("E-32"), "got {s}");
+    }
+
+    #[test]
+    fn subnormal_min_positive() {
+        // f64::MIN_POSITIVE (~2.2e-308) is a NORMAL number.
+        let s1 = format_result(f64::MIN_POSITIVE);
+        assert!(!s1.contains("NaN"), "got {s1}");
+        assert!(s1.contains('E'), "got {s1}");
+        // The smallest subnormal (~5e-324).
+        let s2 = format_result(f64::from_bits(1));
+        assert!(!s2.contains("NaN"), "got {s2}");
+        assert!(s2.contains('E'), "got {s2}");
     }
 }
 

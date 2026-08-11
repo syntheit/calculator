@@ -276,6 +276,8 @@ fn match_func(chars: &[char], i: usize) -> Option<(usize, Matched)> {
 }
 
 /// Scan a numeric literal starting at `i`. Rejects a second decimal point.
+/// An `'e'`/`'E'` is NEVER part of a numeric literal — it is always left for the
+/// Euler-constant path (so `2e` = 2×Euler, and `2e5` = 2×Euler×5).
 fn scan_number(chars: &[char], i: usize) -> Result<(f64, usize), EvalError> {
     let start = i;
     let mut j = i;
@@ -489,5 +491,42 @@ mod tests {
         assert_eq!(toks("cos(")[0], Token::Func(FuncName::Cos));
         assert_eq!(toks("log2(")[0], Token::Func(FuncName::Log2));
         assert_eq!(toks("log(")[0], Token::Func(FuncName::Log));
+    }
+
+    #[test]
+    fn e_is_euler_not_scientific() {
+        // `e` is a user-enterable Euler constant, never a scientific exponent.
+        // Implicit multiplication inserts a `*` on each side of the constant.
+        assert_eq!(
+            toks("2e5"),
+            vec![
+                Token::Number(2.0),
+                Token::Star,
+                Token::E,
+                Token::Star,
+                Token::Number(5.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn bare_e_still_euler() {
+        assert_eq!(toks("2e"), vec![Token::Number(2.0), Token::Star, Token::E]);
+    }
+
+    #[test]
+    fn e_minus_is_euler_minus() {
+        // `1e-3` is `1 × e − 3`: a `*` is inserted before the value-opening `e`,
+        // but the `-` operator is not a value-opener so no `*` follows `e`.
+        assert_eq!(
+            toks("1e-3"),
+            vec![
+                Token::Number(1.0),
+                Token::Star,
+                Token::E,
+                Token::Minus,
+                Token::Number(3.0),
+            ]
+        );
     }
 }

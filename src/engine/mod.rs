@@ -102,4 +102,15 @@ mod tests {
         assert!(close(evaluate("cos(\u{03C0}", AngleUnit::Rad).unwrap(), -1.0));
         assert!(close(evaluate("2*(3+4", AngleUnit::Rad).unwrap(), 14.0));
     }
+
+    #[test]
+    fn e_is_euler_not_scientific_end_to_end() {
+        // `2e+5` is `2 × e + 5` (≈ 9.4366), never scientific `200000`: the `e`
+        // is the Euler constant, so implicit multiplication binds `2` to it.
+        let got = evaluate("2e+5", AngleUnit::Rad).unwrap();
+        assert!(
+            close(got, 2.0 * std::f64::consts::E + 5.0),
+            "expected 2*e+5, got {got}"
+        );
+    }
 }

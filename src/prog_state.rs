@@ -47,8 +47,8 @@
 //! instead [`ProgState::set_base`] reads the current live value (under the old
 //! base) and re-renders it as a digit string in the new base. So `"FF"` in
 //! `Hex` becomes `"255"` after switching to `Dec`. If there is no live value
-//! (empty or un-parseable buffer) the buffer is cleared rather than seeded with
-//! `"0"`. [`ProgState::set_width`] and [`ProgState::set_signed`] behave
+//! (empty or un-parseable buffer) the buffer is preserved as-is rather than
+//! cleared. [`ProgState::set_width`] and [`ProgState::set_signed`] behave
 //! similarly, but additionally re-mask the value to the new width / signedness.
 //!
 //! # Settings & error semantics
@@ -172,20 +172,31 @@ impl ProgState {
         }
     }
 
-    /// Switches the active base, collapsing the current live value into the new
-    /// base's digit string.
+    /// Switches the active base. A complete live value is collapsed into the new
+    /// base's digit string. A partial (un-parseable) buffer is **preserved**
+    /// only when every one of its digit characters is valid in the destination
+    /// base, so an in-progress expression survives the switch (its digits are
+    /// reinterpreted going forward); otherwise it would leave digits the new
+    /// base can't lex, so it is **cleared** instead.
     ///
     /// No-op if the base is unchanged. The live value is read *before* the base
-    /// changes; a present value is re-rendered in the new base, while a missing
-    /// value (empty or un-parseable buffer) clears the buffer. Clears the error.
+    /// changes. Clears the error.
     pub fn set_base(&mut self, base: Base) {
         if base == self.base {
             return;
         }
-        let v = self.value();
-        match v {
-            Some(v) => self.buffer = programmer::format(v, base, self.width, self.signed),
-            None => self.buffer.clear(),
+        if let Some(v) = self.value() {
+            // A complete value collapses to its rendering in the new base.
+            self.buffer = programmer::format(v, base, self.width, self.signed);
+        } else if !self
+            .buffer
+            .chars()
+            .filter(|c| c.is_alphanumeric())
+            .all(|c| base.is_valid_digit(c))
+        {
+            // A partial buffer carrying digits invalid in the new base would be
+            // unlexable, so drop it. Operator chars are not digits and ignored.
+            self.buffer.clear();
         }
         self.base = base;
         self.error = None;
@@ -246,6 +257,24 @@ impl ProgState {
             return None;
         }
         programmer::evaluate(&self.buffer, self.base, self.width, self.signed).ok()
+    }
+
+    /// Live-evaluates the buffer to surface a *genuine arithmetic* error while
+    /// typing, without flagging partial (mid-type) syntax.
+    ///
+    /// An empty (or whitespace-only) buffer, or a `Syntax` error (a half-typed
+    /// expression such as `"5+"`), stays silent and returns `None`. A complete
+    /// expression that hits `DivideByZero` or `Overflow` returns `Some(msg)` so
+    /// the UI can surface it before `=` is pressed. Never sets `error`.
+    pub fn error_preview(&self) -> Option<String> {
+        if self.buffer.trim().is_empty() {
+            return None;
+        }
+        match programmer::evaluate(&self.buffer, self.base, self.width, self.signed) {
+            Ok(_) => None,
+            Err(programmer::ProgError::Syntax) => None,
+            Err(e) => Some(e.to_string()),
+        }
     }
 
     /// Renders the current live value in `base` for display.
@@ -449,6 +478,76 @@ mod tests {
         let mut s = ProgState::new(Base::Hex, Width::W8, false);
         s.press_digit('a');
         assert_eq!(s.expression(), "A");
+    }
+
+    #[test]
+    fn divide_by_zero_live_surfaces_error() {
+        let mut s = ProgState::new(Base::Dec, Width::W8, false);
+        s.press_digit('5');
+        s.press_op("/");
+        s.press_digit('0');
+        // Complete arithmetic error: surfaced live, before pressing =.
+        assert_eq!(s.error_preview(), Some("Can't divide by 0".to_string()));
+        // A partial expression stays silent.
+        let mut s2 = ProgState::new(Base::Dec, Width::W8, false);
+        s2.press_digit('5');
+        s2.press_op("+");
+        assert_eq!(s2.error_preview(), None);
+    }
+
+    #[test]
+    fn partial_expr_live_is_silent() {
+        let mut s = ProgState::new(Base::Dec, Width::W8, false);
+        s.press_digit('5');
+        s.press_op("+");
+        assert_eq!(s.error_preview(), None);
+    }
+
+    #[test]
+    fn set_base_preserves_partial_buffer() {
+        let mut s = ProgState::new(Base::Dec, Width::W8, false);
+        s.press_digit('5');
+        s.press_op("+");
+        assert_eq!(s.value(), None);
+        s.set_base(Base::Hex);
+        assert_eq!(s.expression(), "5+");
+        assert_eq!(s.base(), Base::Hex);
+    }
+
+    #[test]
+    fn set_base_preserves_partial_when_digits_valid() {
+        // `5+` in Hex -> Dec: `5` is a valid Dec digit, so the partial buffer
+        // survives the switch unchanged.
+        let mut s = ProgState::new(Base::Hex, Width::W8, false);
+        s.press_digit('5');
+        s.press_op("+");
+        s.set_base(Base::Dec);
+        assert_eq!(s.expression(), "5+");
+        assert_eq!(s.base(), Base::Dec);
+    }
+
+    #[test]
+    fn set_base_clears_partial_with_invalid_digit() {
+        // `A+` in Hex -> Dec: `A` is not a Dec digit and the buffer is not a
+        // complete value, so it is cleared rather than left unlexable.
+        let mut s = ProgState::new(Base::Hex, Width::W8, false);
+        s.press_digit('A');
+        s.press_op("+");
+        s.set_base(Base::Dec);
+        assert_eq!(s.expression(), "");
+        assert_eq!(s.base(), Base::Dec);
+        assert_eq!(s.value(), None);
+    }
+
+    #[test]
+    fn set_base_clears_dec_partial_invalid_in_bin() {
+        // `9+` in Dec -> Bin: `9` is not a Bin digit and the buffer is partial,
+        // so it is cleared.
+        let mut s = ProgState::new(Base::Dec, Width::W8, false);
+        s.press_digit('9');
+        s.press_op("+");
+        s.set_base(Base::Bin);
+        assert_eq!(s.expression(), "");
     }
 }
 

@@ -228,6 +228,10 @@ pub fn depreciation_sln(cost: f64, salvage: f64, life: f64) -> Result<f64, FinEr
 ///
 /// `life` must be positive, else [`FinError::DivByZero`]. `period` must be an
 /// integer in `1..=life`, else [`FinError::Invalid`].
+///
+/// A huge `life` overflows the `life * (life + 1)` denominator to `inf`, which
+/// would silently collapse the result to `0.0`; such a non-finite intermediate
+/// is rejected with [`FinError::Invalid`] before the division.
 pub fn depreciation_syd(
     cost: f64,
     salvage: f64,
@@ -242,7 +246,16 @@ pub fn depreciation_syd(
     if period.fract() != 0.0 || period < 1.0 || period > life {
         return Err(FinError::Invalid);
     }
-    finite((cost - salvage) * (life - period + 1.0) / (life * (life + 1.0) / 2.0))
+    // Guard the intermediates explicitly: with a huge `life` the denominator
+    // `life * (life + 1)` overflows to `inf`, and a finite numerator / `inf`
+    // collapses to a *finite* `0.0` that `finite()` would wrongly accept. So we
+    // must reject a non-finite numerator or denominator here, before dividing.
+    let numer = (cost - salvage) * (life - period + 1.0);
+    let denom = life * (life + 1.0) / 2.0;
+    if !numer.is_finite() || !denom.is_finite() {
+        return Err(FinError::Invalid);
+    }
+    finite(numer / denom)
 }
 
 /// Double-declining-balance depreciation (GNOME `Ddb`).
@@ -369,6 +382,26 @@ mod tests {
         // Non-integer period is invalid.
         assert!(depreciation_syd(1000.0, 100.0, 5.0, 2.5).is_err());
         // Valid period still works.
+        assert!(close(
+            depreciation_syd(1000.0, 100.0, 5.0, 1.0).unwrap(),
+            300.0,
+            1e-9
+        ));
+    }
+
+    #[test]
+    fn syd_huge_life_is_error() {
+        // A huge `life` overflows the denominator to `inf`; the result must be
+        // an explicit error, NOT a silently-wrong Ok(0.0).
+        assert_eq!(
+            depreciation_syd(1000.0, 100.0, 1e200, 1.0),
+            Err(FinError::Invalid)
+        );
+    }
+
+    #[test]
+    fn syd_normal_still_works() {
+        // SYD for cost=1000, salvage=100, life=5, period=1 = 900*5/15 = 300.
         assert!(close(
             depreciation_syd(1000.0, 100.0, 5.0, 1.0).unwrap(),
             300.0,

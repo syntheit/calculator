@@ -236,6 +236,20 @@ pub fn format_conversion(value: f64) -> String {
     crate::engine::format_result(value)
 }
 
+/// True when a converted value is not a finite number (overflow / invalid).
+///
+/// A linear conversion multiplies by `from.factor` and divides by `to.factor`;
+/// with extreme magnitudes and factors this can overflow `f64` to `inf`
+/// (or produce `NaN`). The plain [`format_result`](crate::engine::format_result)
+/// renderer maps those to a bare `"∞"`, which would be shown and copied as if it
+/// were a real result. The UI uses this at the converter boundary to surface an
+/// error state instead — mirroring how the main calculator reports overflow.
+// wired by the converter UI overflow fix
+#[allow(dead_code)]
+pub fn is_overflow(value: f64) -> bool {
+    !value.is_finite()
+}
+
 // ---------------------------------------------------------------------------
 // Unit tables
 // ---------------------------------------------------------------------------
@@ -636,5 +650,24 @@ mod tests {
         assert_eq!(format_conversion(1000.0), "1,000");
         assert_eq!(format_conversion(2.5000), "2.5");
         assert_eq!(format_conversion(conv(Category::Length, "kilometer", "meter", 5.0)), "5,000");
+    }
+
+    // -- Overflow / non-finite guard ---------------------------------------
+
+    #[test]
+    fn overflow_conversion_detected() {
+        // mile (factor 1609.344) → micrometer (factor 1e-6) multiplies by ~1.6e9,
+        // so a near-f64::MAX input overflows to a non-finite result.
+        let result = conv(Category::Length, "mile", "micrometer", 1e308);
+        assert!(!result.is_finite(), "expected overflow to inf, got {result}");
+        assert!(is_overflow(result), "is_overflow should flag the overflow");
+    }
+
+    #[test]
+    fn normal_conversion_not_overflow() {
+        // A run-of-the-mill conversion stays finite.
+        let result = conv(Category::Length, "kilometer", "meter", 1.0);
+        assert!(approx(result, 1000.0));
+        assert!(!is_overflow(result), "normal result must not be flagged");
     }
 }

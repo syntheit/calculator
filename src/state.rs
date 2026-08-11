@@ -441,6 +441,9 @@ impl Calculator {
                 Func::Log => {
                     // 10ˣ: insert "10^". Stored as a number and a caret so it
                     // reads and backspaces naturally.
+                    if self.last_ends_value() {
+                        self.buf.push(Chunk::Sym("*"));
+                    }
                     self.buf.push(Chunk::Number("10".to_string()));
                     self.buf.push(Chunk::Sym("^"));
                 }
@@ -495,9 +498,18 @@ impl Calculator {
             .collect();
         // A non-finite or otherwise unparseable value (e.g. "∞", "NaN") has no
         // valid literal form; leave the (freshly-begun) buffer untouched.
+        // `f64::parse` accepts "NaN"/"inf"/"-inf", so guard `is_finite`
+        // explicitly to keep an unlexable chunk (and a `format_seed` panic in
+        // debug) out of the buffer.
         let Ok(v) = normalized.parse::<f64>() else {
             return;
         };
+        if !v.is_finite() {
+            return;
+        }
+        if self.last_ends_value() {
+            self.buf.push(Chunk::Sym("*"));
+        }
         // Re-emit as a plain decimal the lexer accepts, with a leading unary
         // minus for negatives (the lexer has no signed-literal grammar).
         if v.is_sign_negative() && v != 0.0 {
@@ -622,27 +634,42 @@ impl Calculator {
         }
     }
 
-    /// MR: insert the stored value as a number chunk.
+    /// MR: insert the stored value, gluing to a preceding value with implicit
+    /// multiplication and representing a negative as a leading unary minus.
     pub fn memory_recall(&mut self) {
         if let Some(v) = self.memory {
             self.begin_fresh_if_needed();
-            // Implicit-mult handles a value following a value; insert as a
-            // number and let evaluation glue it.
-            self.buf.push(Chunk::Number(format_seed(v)));
+            if self.last_ends_value() {
+                self.buf.push(Chunk::Sym("*"));
+            }
+            if v.is_sign_negative() && v != 0.0 {
+                self.buf.push(Chunk::Sym("-"));
+                self.buf.push(Chunk::Number(format_seed(v.abs())));
+            } else {
+                self.buf.push(Chunk::Number(format_seed(v)));
+            }
         }
     }
 
-    /// M+: add the current value to memory (initialising it to 0 if empty).
+    /// M+: add the current value to memory (initialising it to 0 if empty). A
+    /// non-finite (overflow) result leaves the register unchanged.
     pub fn memory_add(&mut self) {
         if let Some(v) = self.current_value() {
-            self.memory = Some(self.memory.unwrap_or(0.0) + v);
+            let candidate = self.memory.unwrap_or(0.0) + v;
+            if candidate.is_finite() {
+                self.memory = Some(candidate);
+            }
         }
     }
 
-    /// M−: subtract the current value from memory.
+    /// M−: subtract the current value from memory. A non-finite (overflow)
+    /// result leaves the register unchanged.
     pub fn memory_sub(&mut self) {
         if let Some(v) = self.current_value() {
-            self.memory = Some(self.memory.unwrap_or(0.0) - v);
+            let candidate = self.memory.unwrap_or(0.0) - v;
+            if candidate.is_finite() {
+                self.memory = Some(candidate);
+            }
         }
     }
 
@@ -775,15 +802,18 @@ impl Calculator {
 // ---- free helpers ----------------------------------------------------------
 
 /// Format a value for reuse as a seed/number chunk. Uses a plain (ungrouped)
-/// representation so it re-tokenizes cleanly, trimming trailing zeros.
+/// representation so it re-tokenizes cleanly. Emits the shortest round-tripping
+/// decimal (no fixed precision, no trailing-zero trimming needed), so tiny/huge
+/// magnitudes are lossless. Integers take a fast path.
 fn format_seed(v: f64) -> String {
+    debug_assert!(v.is_finite());
     if v == v.trunc() && v.abs() < 1e15 {
         format!("{}", v as i64)
     } else {
-        // Enough precision to round-trip the displayed value.
-        let s = format!("{:.12}", v);
-        let trimmed = s.trim_end_matches('0').trim_end_matches('.');
-        trimmed.to_string()
+        // Shortest round-tripping decimal. `{}` never emits exponent notation
+        // for f64, so this is always a plain decimal the lexer accepts, and it
+        // carries no trailing-zero cruft to trim.
+        format!("{v}")
     }
 }
 
@@ -1286,6 +1316,28 @@ mod tests {
         assert!((v - (-625.0)).abs() < 1e-9, "expected -625, got {v}");
     }
 
+    #[test]
+    fn insert_result_ignores_nan() {
+        let mut calc = c();
+        calc.insert_result("NaN"); // must not panic
+        assert_eq!(calc.current_value(), None);
+    }
+
+    #[test]
+    fn insert_result_ignores_inf() {
+        let mut calc = c();
+        calc.insert_result("inf"); // must not panic
+        assert_eq!(calc.current_value(), None);
+    }
+
+    #[test]
+    fn insert_result_accepts_finite() {
+        let mut calc = c();
+        calc.insert_result("42");
+        let v = calc.current_value().expect("bare number should evaluate");
+        assert!((v - 42.0).abs() < 1e-9, "expected 42, got {v}");
+    }
+
     // ---- hyperbolic + new sci functions -----------------------------------
 
     #[test]
@@ -1335,5 +1387,90 @@ mod tests {
         assert_eq!(calc.display_expression(), "\u{2212}5");
         calc.press_negate();
         assert_eq!(calc.display_expression(), "5");
+    }
+
+    #[test]
+    fn memory_recall_after_value_multiplies() {
+        let mut calc = c();
+        type_str(&mut calc, "5");
+        calc.equals();
+        calc.memory_store();
+        calc.clear();
+        type_str(&mut calc, "2");
+        calc.memory_recall();
+        assert_eq!(calc.current_value(), Some(10.0)); // 2*5, not 25
+    }
+
+    #[test]
+    fn memory_recall_negative_is_multiply_not_subtract() {
+        let mut calc = c();
+        type_str(&mut calc, "-5");
+        calc.equals();
+        calc.memory_store();
+        calc.clear();
+        type_str(&mut calc, "2");
+        calc.memory_recall();
+        assert_eq!(calc.current_value(), Some(-10.0)); // 2*-5, not -3
+    }
+
+    #[test]
+    fn insert_result_after_value_multiplies() {
+        let mut calc = c();
+        type_str(&mut calc, "2");
+        calc.insert_result("5");
+        assert_eq!(calc.current_value(), Some(10.0));
+    }
+
+    #[test]
+    fn insert_result_negative_after_value() {
+        let mut calc = c();
+        type_str(&mut calc, "2");
+        calc.insert_result("-5");
+        assert_eq!(calc.current_value(), Some(-10.0)); // 2 * -5
+    }
+
+    #[test]
+    fn inverse_log_after_value_multiplies() {
+        let mut calc = c();
+        type_str(&mut calc, "2");
+        calc.toggle_inv();
+        calc.press_func(Func::Log);
+        calc.set_inv(false);
+        calc.press_digit('3');
+        assert_eq!(calc.current_value(), Some(2000.0)); // 2*10^3
+    }
+
+    #[test]
+    fn tiny_result_seeds_losslessly() {
+        let s = format_seed(1e-13);
+        let v = engine::evaluate(&s, AngleUnit::Rad).unwrap();
+        assert!((v / 1e-13 - 1.0).abs() < 1e-9, "got {v} from {s}");
+    }
+
+    #[test]
+    fn format_seed_round_trips() {
+        for v in [3.14, 1e-13, 1e20, 1.5e-8, 0.000001, 123456.789] {
+            let s = format_seed(v);
+            let got = engine::evaluate(&s, AngleUnit::Rad).unwrap();
+            assert!((got / v - 1.0).abs() < 1e-9, "v={v} s={s} got={got}");
+        }
+    }
+
+    #[test]
+    fn memory_add_overflow_rejected() {
+        let mut calc = c();
+        calc.insert_result("1e308");
+        calc.equals();
+        calc.memory_store(); // M = 1e308
+        calc.clear();
+        calc.insert_result("1e308");
+        calc.equals();
+        calc.memory_add(); // candidate = 2e308 = inf -> rejected
+        assert!(calc.has_memory());
+        calc.clear();
+        calc.memory_recall();
+        let v = calc.current_value().unwrap();
+        assert!(v.is_finite(), "memory must stay finite, got {v}");
+        assert!((v / 1e308 - 1.0).abs() < 1e-9, "memory should remain 1e308, got {v}");
     }
 }

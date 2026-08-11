@@ -239,12 +239,20 @@ impl Ui {
                 let from = &units[st.from_idx.min(units.len() - 1)];
                 let to = &units[st.to_idx.min(units.len() - 1)];
                 let r = crate::convert::convert(st.category, from, to, st.value());
-                crate::engine::format::format_result_locale(r, self.locale())
+                if crate::convert::is_overflow(r) {
+                    String::new()
+                } else {
+                    crate::engine::format::format_result_locale(r, self.locale())
+                }
             }
             Some("programmer") => {
                 let st = self.prog.borrow();
-                let b = st.base();
-                st.display(b)
+                if st.error_preview().is_some() {
+                    String::new()
+                } else {
+                    let b = st.base();
+                    st.display(b)
+                }
             }
             Some("financial") => self.fin_result_label.text().to_string(),
             _ => {
@@ -270,11 +278,14 @@ impl Ui {
     /// borrow is held across any widget setter.
     fn render_prog(&self) {
         // Read everything needed into locals, then drop the borrow.
-        let (has_err, err_msg, active_base, hex, dec, oct, bin, expr) = {
+        let (latched_err, err_msg, live_err, active_base, hex, dec, oct, bin, expr) = {
             let st = self.prog.borrow();
+            let latched = st.error().map(|s| s.to_string());
+            let live = st.error_preview();
             (
-                st.error().is_some(),
-                st.error().map(|s| s.to_string()).unwrap_or_default(),
+                latched.is_some(),
+                latched.clone().or_else(|| live.clone()).unwrap_or_default(),
+                live.is_some(),
                 st.base(),
                 st.display(Base::Hex),
                 st.display(Base::Dec),
@@ -283,6 +294,7 @@ impl Ui {
                 st.expression(),
             )
         };
+        let has_err = latched_err || live_err;
 
         // Grouping for readability.
         let loc = self.locale();
@@ -300,7 +312,13 @@ impl Ui {
         // Set the 4 value labels [Hex,Dec,Oct,Bin].
         let grouped = [hex_g, dec_g, oct_g, bin_g];
         for (label, text) in self.prog_row_values.iter().zip(grouped.iter()) {
-            label.set_text(text);
+            // On a live arithmetic error, `display()` returns "0"; blank the
+            // rows instead of showing a bogus value.
+            if live_err {
+                label.set_text("");
+            } else {
+                label.set_text(text);
+            }
         }
 
         // Highlight the active base row (0=Hex,1=Dec,2=Oct,3=Bin).
@@ -418,14 +436,19 @@ impl Ui {
         }
         drop(rows);
 
-        // Result: Ok → locale-formatted; Err → the error message + error class.
+        // Result: None → incomplete (neutral blank); Some(Ok) → formatted;
+        // Some(Err) → error message + error class.
         match result {
-            Ok(v) => {
+            None => {
+                self.fin_result_label.remove_css_class("calc-error");
+                self.fin_result_label.set_text("");
+            }
+            Some(Ok(v)) => {
                 self.fin_result_label.remove_css_class("calc-error");
                 self.fin_result_label
                     .set_text(&crate::engine::format::format_result_locale(v, self.locale()));
             }
-            Err(e) => {
+            Some(Err(e)) => {
                 self.fin_result_label.add_css_class("calc-error");
                 self.fin_result_label.set_text(&e.to_string());
             }
@@ -2121,7 +2144,17 @@ fn converter_refresh(ui: &Ui, top: &gtk::Label, bottom: &gtk::Label) {
     let localized_input = localize_decimal_string(&shown_input, ui.locale());
     top.set_text(&format!("{} {}", localized_input, from.symbol));
     let result = crate::convert::convert(st.category, from, to, st.value());
-    bottom.set_text(&format!("{} {}", crate::engine::format::format_result_locale(result, ui.locale()), to.symbol));
+    if crate::convert::is_overflow(result) {
+        bottom.add_css_class("calc-error");
+        bottom.set_text("Overflow");
+    } else {
+        bottom.remove_css_class("calc-error");
+        bottom.set_text(&format!(
+            "{} {}",
+            crate::engine::format::format_result_locale(result, ui.locale()),
+            to.symbol
+        ));
+    }
 }
 
 /// Build a round converter keypad button of the given label + style class that

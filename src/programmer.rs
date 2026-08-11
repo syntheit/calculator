@@ -63,6 +63,8 @@
 //!   renders as `"11111111"` (exactly 8 characters). Hex and octal use minimal
 //!   width with no padding.
 
+use std::cell::Cell;
+
 /// A numeric base for input literals and output formatting.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Base {
@@ -284,6 +286,37 @@ fn lex(input: &str, base: Base) -> Result<Vec<Token>, ProgError> {
     Ok(tokens)
 }
 
+/// Maximum recursive-descent depth. Deeply nested input like `(((…1…)))`, a
+/// run of unary `~` (`~~~…`), or a run of unary `-` (`----…`) recurses ~one
+/// guard level per nesting level: the [`DepthGuard`] is applied at
+/// [`Parser::parse_unary`] (the `~` / unary `-` chain) and
+/// [`Parser::parse_atom`] (the `(` … `)` descent back into `parse_or`), each
+/// entered ~once per real nesting level. Past this cap we return
+/// [`ProgError::Syntax`] instead of overflowing the stack.
+const MAX_DEPTH: usize = 256;
+
+/// RAII guard that increments the parser's recursion depth on construction and
+/// decrements it on drop (panic-safe, and runs on every `?` early-return path).
+/// Holds a shared borrow of a `Cell`, so the parse methods can keep `&mut self`.
+struct DepthGuard<'a>(&'a Cell<usize>);
+
+impl<'a> DepthGuard<'a> {
+    fn new(d: &'a Cell<usize>) -> Result<Self, ProgError> {
+        let n = d.get() + 1;
+        if n > MAX_DEPTH {
+            return Err(ProgError::Syntax);
+        }
+        d.set(n);
+        Ok(DepthGuard(d))
+    }
+}
+
+impl Drop for DepthGuard<'_> {
+    fn drop(&mut self) {
+        self.0.set(self.0.get() - 1);
+    }
+}
+
 /// A precedence-climbing recursive-descent parser that evaluates inline.
 ///
 /// Each `parse_*` method returns the running `u128` accumulator already masked
@@ -294,6 +327,10 @@ struct Parser<'a> {
     pos: usize,
     width: Width,
     signed: bool,
+    /// Reference to a caller-owned recursion counter. Held as a reference (not
+    /// an owned `Cell`) so a [`DepthGuard`] can borrow it without also borrowing
+    /// `self`, leaving the parse methods free to take `&mut self`.
+    depth: &'a Cell<usize>,
 }
 
 impl<'a> Parser<'a> {
@@ -423,6 +460,7 @@ impl<'a> Parser<'a> {
 
     /// Level 7: unary `~` (bitwise NOT) and unary `-` (negate).
     fn parse_unary(&mut self) -> Result<u128, ProgError> {
+        let _guard = DepthGuard::new(self.depth)?;
         match self.peek() {
             Some(Token::Tilde) => {
                 self.bump();
@@ -440,6 +478,7 @@ impl<'a> Parser<'a> {
 
     /// Level 0: a literal or a parenthesized sub-expression.
     fn parse_atom(&mut self) -> Result<u128, ProgError> {
+        let _guard = DepthGuard::new(self.depth)?;
         match self.bump() {
             Some(&Token::Number(n)) => Ok(n & self.width.mask()),
             Some(&Token::LParen) => {
@@ -526,11 +565,13 @@ pub fn evaluate(expr: &str, base: Base, width: Width, signed: bool) -> Result<i1
     if tokens.is_empty() {
         return Err(ProgError::Syntax);
     }
+    let depth = Cell::new(0);
     let mut parser = Parser {
         tokens: &tokens,
         pos: 0,
         width,
         signed,
+        depth: &depth,
     };
     let raw = parser.parse()?;
     Ok(masked(raw as i128, width, signed))
@@ -865,6 +906,45 @@ mod tests {
     #[test]
     fn format_oct_minimal_neg() {
         assert_eq!(format(-1, Base::Oct, Width::W8, true), "377");
+    }
+
+    #[test]
+    fn deeply_nested_parens_is_syntax_not_crash() {
+        // A pathological run of `(` (keyboard auto-repeat) must hit the
+        // recursion-depth cap and return a clean Syntax error, never overflow
+        // the stack. The unterminated parens are also a syntax error, but the
+        // point is that we return rather than SIGABRT.
+        let s = "(".repeat(5000);
+        assert_eq!(
+            evaluate(&s, Base::Dec, Width::W32, false),
+            Err(ProgError::Syntax)
+        );
+    }
+
+    #[test]
+    fn deeply_nested_tilde_is_syntax_not_crash() {
+        let s = "~".repeat(5000);
+        assert_eq!(
+            evaluate(&s, Base::Dec, Width::W32, false),
+            Err(ProgError::Syntax)
+        );
+    }
+
+    #[test]
+    fn deeply_nested_minus_is_syntax_not_crash() {
+        let s = "-".repeat(5000);
+        assert_eq!(
+            evaluate(&s, Base::Dec, Width::W32, false),
+            Err(ProgError::Syntax)
+        );
+    }
+
+    #[test]
+    fn moderately_nested_parens_still_evaluate() {
+        // Nesting well under the cap must still work: the guard must not break
+        // ordinary parenthesized input.
+        let s = "(".repeat(50) + "1" + &")".repeat(50);
+        assert_eq!(evaluate(&s, Base::Dec, Width::W32, false), Ok(1));
     }
 }
 
