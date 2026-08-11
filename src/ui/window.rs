@@ -1757,6 +1757,31 @@ fn show_history(ui: &Ui) {
             ));
             row.add_suffix(&del_btn);
 
+            // Swipe-to-delete: a leftward horizontal-dominant flick removes this
+            // entry the same way the trash button does. Reliable flick-detect —
+            // no follow-finger reveal, no red overlay, no CSS. The velocity gate
+            // (horizontal must dominate, sufficient leftward speed) means a plain
+            // tap won't fire it and a vertical scroll-flick stays with the
+            // ScrolledWindow's kinetic scroll (the gesture never claims the seq).
+            let swipe = gtk::GestureSwipe::new();
+            swipe.connect_swipe(clone!(
+                #[weak]
+                ui,
+                #[upgrade_or_default]
+                move |_gesture, velocity_x, velocity_y| {
+                    if velocity_x < -300.0 && velocity_x.abs() > velocity_y.abs() {
+                        {
+                            let mut h = ui.history.borrow_mut();
+                            h.remove(storage_idx);
+                            h.save();
+                        }
+                        ui.nav.pop();
+                        show_history(&ui);
+                    }
+                }
+            ));
+            row.add_controller(swipe);
+
             if let Some(g) = &group {
                 g.add(&row);
             }
