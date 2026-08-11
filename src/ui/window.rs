@@ -52,6 +52,13 @@ pub struct Ui {
     sci_sinh: Rc<Vec<gtk::Button>>,
     sci_cosh: Rc<Vec<gtk::Button>>,
     sci_tanh: Rc<Vec<gtk::Button>>,
+    /// The `^` / `ʸ√x` power button — label flips to the nth-root glyph in inv.
+    /// Holds both orientation copies (portrait then landscape).
+    sci_pow: Rc<Vec<gtk::Button>>,
+    /// The combined `nPr` / `nCr` button — label flips in inv (press dispatches
+    /// on inv at click time). Holds both orientation copies (portrait then
+    /// landscape).
+    sci_perm: Rc<Vec<gtk::Button>>,
     /// The AdwNavigationView the history page is pushed onto.
     nav: adw::NavigationView,
     /// Converter page state (category + selected unit indices + input string).
@@ -235,6 +242,12 @@ impl Ui {
         }
         for b in self.sci_tanh.iter() {
             b.set_label(if inv { "atanh" } else { "tanh" });
+        }
+        for b in self.sci_pow.iter() {
+            b.set_label(if inv { "\u{02B8}\u{221A}x" } else { "^" });
+        }
+        for b in self.sci_perm.iter() {
+            b.set_label(if inv { "nCr" } else { "nPr" });
         }
 
         // Deg/Rad button: show the CURRENT mode. It's a normal gray
@@ -1068,6 +1081,8 @@ pub fn build_ui(app: &adw::Application) {
         sci_sinh: Rc::new(vec![sp.sinh.clone(), sl.sinh.clone()]),
         sci_cosh: Rc::new(vec![sp.cosh.clone(), sl.cosh.clone()]),
         sci_tanh: Rc::new(vec![sp.tanh.clone(), sl.tanh.clone()]),
+        sci_pow: Rc::new(vec![sp.pow.clone(), sl.pow.clone()]),
+        sci_perm: Rc::new(vec![sp.perm.clone(), sl.perm.clone()]),
         nav: nav.clone(),
         converter: Rc::new(RefCell::new(ConverterState {
             category: start_cat,
@@ -1525,6 +1540,10 @@ struct SciButtons {
     sinh: gtk::Button,
     cosh: gtk::Button,
     tanh: gtk::Button,
+    /// The `^` / `ʸ√x` power button (label flips to the nth-root glyph in inv).
+    pow: gtk::Button,
+    /// The combined `nPr` / `nCr` button (label + press dispatch flip in inv).
+    perm: gtk::Button,
 }
 
 /// Build a fresh set of the 8 stateful scientific buttons (deg, inv, sin, cos,
@@ -1543,6 +1562,8 @@ fn make_sci_buttons() -> SciButtons {
         sinh: sci_button("sinh"),
         cosh: sci_button("cosh"),
         tanh: sci_button("tanh"),
+        pow: sci_button("^"),
+        perm: sci_button("nPr"),
     }
 }
 
@@ -1591,6 +1612,27 @@ fn wire_sci_buttons(ui: &Ui, s: &SciButtons) {
     wire_sci(&s.sinh, ui, |c| c.press_func(Func::Sinh));
     wire_sci(&s.cosh, ui, |c| c.press_func(Func::Cosh));
     wire_sci(&s.tanh, ui, |c| c.press_func(Func::Tanh));
+
+    // Power / nth-root: `press_power` branches on inv internally (`^` vs `root(`).
+    wire_sci(&s.pow, ui, |c| c.press_power());
+
+    // nPr / nCr: one button, dispatch on inv (nCr under inv). Scope the mut
+    // borrow in its own block, then render after it is dropped.
+    s.perm.connect_clicked(clone!(
+        #[weak]
+        ui,
+        move |_| {
+            {
+                let mut c = ui.calc.borrow_mut();
+                if c.inv() {
+                    c.press_ncr();
+                } else {
+                    c.press_npr();
+                }
+            }
+            ui.render();
+        }
+    ));
 }
 
 /// The 5×4 basic keypad grid.
@@ -1692,11 +1734,11 @@ fn build_scientific_pad_portrait(ui: &Ui, s: &SciButtons) -> gtk::Grid {
         .margin_bottom(4)
         .build();
 
-    // Stateless, page-local buttons.
+    // Stateless, page-local buttons. (`^`/`ʸ√x` and `nPr`/`nCr` are STATEFUL —
+    // built in `make_sci_buttons`, wired in `wire_sci_buttons`, relabelled in
+    // `sync_sci` — and attached below via `s.pow` / `s.perm`.)
     let pi = sci_button("\u{03C0}");
     wire_sci(&pi, ui, |c| c.press_pi());
-    let pow = sci_button("^");
-    wire_sci(&pow, ui, |c| c.press_power());
     let fact = sci_button("!");
     wire_sci(&fact, ui, |c| c.press_factorial());
     let euler = sci_button("e");
@@ -1709,11 +1751,13 @@ fn build_scientific_pad_portrait(ui: &Ui, s: &SciButtons) -> gtk::Grid {
     wire_sci(&recip, ui, |c| c.press_reciprocal());
     let negate = sci_button("\u{00B1}");
     wire_sci(&negate, ui, |c| c.press_negate());
+    let comma = sci_button(",");
+    wire_sci(&comma, ui, |c| c.press_comma());
 
     // Row 0: √ π ^ !
     grid.attach(&s.sqrt, 0, 0, 1, 1);
     grid.attach(&pi, 1, 0, 1, 1);
-    grid.attach(&pow, 2, 0, 1, 1);
+    grid.attach(&s.pow, 2, 0, 1, 1);
     grid.attach(&fact, 3, 0, 1, 1);
 
     // Row 1: Deg sin cos tan
@@ -1734,10 +1778,14 @@ fn build_scientific_pad_portrait(ui: &Ui, s: &SciButtons) -> gtk::Grid {
     grid.attach(&s.tanh, 2, 3, 1, 1);
     grid.attach(&log2_btn, 3, 3, 1, 1);
 
-    // Row 4: 1/x |x| ± (cell 3,4 intentionally left empty)
+    // Row 4: 1/x |x| ± nPr (fills the previously-empty cell 3,4)
     grid.attach(&recip, 0, 4, 1, 1);
     grid.attach(&abs_btn, 1, 4, 1, 1);
     grid.attach(&negate, 2, 4, 1, 1);
+    grid.attach(&s.perm, 3, 4, 1, 1);
+
+    // Row 5: , (cells 1,5..3,5 intentionally left empty)
+    grid.attach(&comma, 0, 5, 1, 1);
 
     grid
 }
@@ -1758,15 +1806,12 @@ fn build_scientific_pad_landscape(ui: &Ui, s: &SciButtons) -> gtk::Grid {
         .vexpand(true)
         .build();
 
-    // Stateless, page-local buttons.
+    // Stateless, page-local buttons. (`^`/`ʸ√x` and `nPr`/`nCr` are STATEFUL —
+    // in `s` — and get the land class + vexpand via the loop below.)
     let pi = sci_button("\u{03C0}");
     wire_sci(&pi, ui, |c| c.press_pi());
     pi.add_css_class("calc-sci-land");
     pi.set_vexpand(true);
-    let pow = sci_button("^");
-    wire_sci(&pow, ui, |c| c.press_power());
-    pow.add_css_class("calc-sci-land");
-    pow.set_vexpand(true);
     let fact = sci_button("!");
     wire_sci(&fact, ui, |c| c.press_factorial());
     fact.add_css_class("calc-sci-land");
@@ -1791,9 +1836,16 @@ fn build_scientific_pad_landscape(ui: &Ui, s: &SciButtons) -> gtk::Grid {
     wire_sci(&negate, ui, |c| c.press_negate());
     negate.add_css_class("calc-sci-land");
     negate.set_vexpand(true);
+    let comma = sci_button(",");
+    wire_sci(&comma, ui, |c| c.press_comma());
+    comma.add_css_class("calc-sci-land");
+    comma.set_vexpand(true);
 
     // Landscape sci buttons: shrink class + fill row height.
-    for b in [&s.inv, &s.deg, &s.sqrt, &s.sin, &s.ln, &s.cos, &s.log, &s.tan, &s.sinh, &s.cosh, &s.tanh] {
+    for b in [
+        &s.inv, &s.deg, &s.sqrt, &s.sin, &s.ln, &s.cos, &s.log, &s.tan, &s.sinh, &s.cosh, &s.tanh,
+        &s.pow, &s.perm,
+    ] {
         b.add_css_class("calc-sci-land");
         b.set_vexpand(true);
     }
@@ -1811,7 +1863,7 @@ fn build_scientific_pad_landscape(ui: &Ui, s: &SciButtons) -> gtk::Grid {
     // Row 2: cos log ^
     grid.attach(&s.cos, 0, 2, 1, 1);
     grid.attach(&s.log, 1, 2, 1, 1);
-    grid.attach(&pow, 2, 2, 1, 1);
+    grid.attach(&s.pow, 2, 2, 1, 1);
 
     // Row 3: tan e !
     grid.attach(&s.tan, 0, 3, 1, 1);
@@ -1828,8 +1880,10 @@ fn build_scientific_pad_landscape(ui: &Ui, s: &SciButtons) -> gtk::Grid {
     grid.attach(&abs_btn, 1, 5, 1, 1);
     grid.attach(&recip, 2, 5, 1, 1);
 
-    // Row 6: ± (cells 1,6 and 2,6 intentionally left empty)
+    // Row 6: ± nPr , (fills the previously-empty cells 1,6 and 2,6)
     grid.attach(&negate, 0, 6, 1, 1);
+    grid.attach(&s.perm, 1, 6, 1, 1);
+    grid.attach(&comma, 2, 6, 1, 1);
 
     grid
 }

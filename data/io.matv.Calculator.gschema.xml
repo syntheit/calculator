@@ -81,6 +81,9 @@
         <choice value="simple"/>
         <choice value="margin"/>
         <choice value="depreciation"/>
+        <choice value="depreciation-sln"/>
+        <choice value="depreciation-syd"/>
+        <choice value="depreciation-ddb"/>
       </choices>
       <default>"compound"</default>
       <summary>Last-used financial calculator</summary>

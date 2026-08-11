@@ -22,7 +22,9 @@
 //! * `press_digit(&mut self, c: char)`     — a digit `'0'..='9'`
 //! * `press_dot(&mut self)`                — decimal point
 //! * `press_op(&mut self, op: Op)`         — + − × ÷
-//! * `press_power(&mut self)`              — `^`
+//! * `press_power(&mut self)`              — `^` (or `root(` when `inv` on)
+//! * `press_npr(&mut self)` / `press_ncr(&mut self)` — `nPr(` / `nCr(`
+//! * `press_comma(&mut self)`              — `,` argument separator
 //! * `press_paren(&mut self)`              — SMART `(` / `)`
 //! * `press_percent(&mut self)`            — `%`
 //! * `press_factorial(&mut self)`          — `!`
@@ -258,8 +260,18 @@ impl Calculator {
         self.buf.push(Chunk::Sym(op.canonical()));
     }
 
-    /// Append `^` (power). Behaves like a binary operator for seeding/replacing.
+    /// Append `^` (power) — or, when [`inv`](Self::inv) is on, open the
+    /// `root(` two-argument nth-root form (`root(y,x)` = the yth root of x, so
+    /// the user types `root(3,27)` for the cube root of 27). The inverse path
+    /// mirrors [`press_abs`](Self::press_abs): begin fresh, then push the
+    /// function-open. Behaves like a binary operator (seeding/replacing) only in
+    /// the normal `^` case.
     pub fn press_power(&mut self) {
+        if self.inv {
+            self.begin_fresh_if_needed();
+            self.buf.push(Chunk::Func("root("));
+            return;
+        }
         if self.state == CalcState::Result {
             self.seed_with_last_result();
         } else if self.state == CalcState::Error {
@@ -370,6 +382,41 @@ impl Calculator {
     pub fn press_log2(&mut self) {
         self.begin_fresh_if_needed();
         self.buf.push(Chunk::Func("log2("));
+    }
+
+    /// Append `nPr(` (permutations, `nPr(n,r)`). Opens a paren; the user types
+    /// `n`, a comma, `r`, and smart-paren/auto-close finishes the group.
+    /// Mirrors [`press_abs`](Self::press_abs): begin fresh, then push the
+    /// function-open (no implicit multiplication).
+    pub fn press_npr(&mut self) {
+        self.begin_fresh_if_needed();
+        self.buf.push(Chunk::Func("nPr("));
+    }
+
+    /// Append `nCr(` (combinations, `nCr(n,r)`). Opens a paren; the user types
+    /// `n`, a comma, `r`, and smart-paren/auto-close finishes the group.
+    /// Mirrors [`press_abs`](Self::press_abs).
+    pub fn press_ncr(&mut self) {
+        self.begin_fresh_if_needed();
+        self.buf.push(Chunk::Func("nCr("));
+    }
+
+    /// Insert a `,` argument separator. A comma is only meaningful right after a
+    /// value inside a two-argument call (`nPr(`, `nCr(`, `root(`), so it is
+    /// appended only when the buffer's last chunk ends a value. After a `=`
+    /// result or an error a comma makes no sense on its own; mirror
+    /// [`press_factorial`](Self::press_factorial)'s guard (seed from the last
+    /// result / reset the error) so the state machine stays consistent, then
+    /// only append when a value precedes it.
+    pub fn press_comma(&mut self) {
+        if self.state == CalcState::Result {
+            self.seed_with_last_result();
+        } else if self.state == CalcState::Error {
+            self.reset_input();
+        }
+        if self.last_ends_value() {
+            self.buf.push(Chunk::Sym(","));
+        }
     }
 
     /// Reciprocal: append `^-1` to the current value (postfix), so `5` becomes
@@ -932,6 +979,8 @@ mod tests {
                 '*' => calc.press_op(Op::Mul),
                 '/' => calc.press_op(Op::Div),
                 '^' => calc.press_power(),
+                ',' => calc.press_comma(),
+                ')' | '(' => calc.press_paren(),
                 _ => panic!("unsupported test char {ch}"),
             }
         }
@@ -1454,6 +1503,70 @@ mod tests {
             let got = engine::evaluate(&s, AngleUnit::Rad).unwrap();
             assert!((got / v - 1.0).abs() < 1e-9, "v={v} s={s} got={got}");
         }
+    }
+
+    // ---- two-arg comma functions: nPr / nCr / nth-root --------------------
+
+    #[test]
+    fn npr_five_two_is_twenty() {
+        let mut calc = c();
+        calc.press_npr(); // "nPr("
+        calc.press_digit('5');
+        calc.press_comma();
+        calc.press_digit('2');
+        calc.press_paren(); // nPr(5,2)
+        assert_eq!(calc.live_result(), Some("20".to_string()));
+    }
+
+    #[test]
+    fn ncr_five_two_is_ten() {
+        let mut calc = c();
+        calc.press_ncr(); // "nCr("
+        calc.press_digit('5');
+        calc.press_comma();
+        calc.press_digit('2');
+        calc.press_paren(); // nCr(5,2)
+        assert_eq!(calc.live_result(), Some("10".to_string()));
+    }
+
+    #[test]
+    fn inv_power_is_nth_root() {
+        let mut calc = c();
+        calc.toggle_inv();
+        calc.press_power(); // opens root( because inv is on
+        calc.set_inv(false); // subsequent digits are normal
+        calc.press_digit('3');
+        calc.press_comma();
+        calc.press_digit('2');
+        calc.press_digit('7');
+        calc.press_paren(); // root(3,27) = 27^(1/3) = 3
+        assert_eq!(calc.live_result(), Some("3".to_string()));
+    }
+
+    #[test]
+    fn npr_display_shows_comma() {
+        let mut calc = c();
+        calc.press_npr();
+        calc.press_digit('5');
+        calc.press_comma();
+        // Proves pretty-print of the nPr( func-open AND the comma separator.
+        assert_eq!(calc.display_expression(), "nPr(5,");
+        assert!(calc.display_expression().contains("5,"));
+    }
+
+    #[test]
+    fn comma_appends_after_value() {
+        let mut calc = c();
+        calc.press_digit('5');
+        calc.press_comma();
+        assert_eq!(calc.display_expression(), "5,");
+    }
+
+    #[test]
+    fn comma_on_empty_is_noop() {
+        let mut calc = c();
+        calc.press_comma();
+        assert_eq!(calc.display_expression(), "");
     }
 
     #[test]

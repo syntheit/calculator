@@ -65,8 +65,17 @@ const MARGIN_FIELDS: [FinField; 2] = [
     FinField { key: "margin", label: "Margin", suffix: "%" },
 ];
 
-/// The input fields for [`FinCalc::Depreciation`].
-const DEPRECIATION_FIELDS: [FinField; 4] = [
+/// The input fields for [`FinCalc::DepreciationSln`] (no per-period input, since
+/// straight-line depreciation is the same every period).
+const DEPRECIATION_SLN_FIELDS: [FinField; 3] = [
+    FinField { key: "cost", label: "Cost", suffix: "$" },
+    FinField { key: "salvage", label: "Salvage value", suffix: "$" },
+    FinField { key: "life", label: "Useful life", suffix: "periods" },
+];
+
+/// The input fields for [`FinCalc::DepreciationSyd`] and
+/// [`FinCalc::DepreciationDdb`]; both take the same cost/salvage/life/period set.
+const DEPRECIATION_PERIOD_FIELDS: [FinField; 4] = [
     FinField { key: "cost", label: "Cost", suffix: "$" },
     FinField { key: "salvage", label: "Salvage value", suffix: "$" },
     FinField { key: "life", label: "Useful life", suffix: "periods" },
@@ -87,19 +96,25 @@ pub enum FinCalc {
     Simple,
     /// Sale price from a gross margin.
     Margin,
+    /// Straight-line depreciation (equal amount every period).
+    DepreciationSln,
     /// Sum-of-years'-digits depreciation for a period.
-    Depreciation,
+    DepreciationSyd,
+    /// Double-declining-balance depreciation for a period.
+    DepreciationDdb,
 }
 
 impl FinCalc {
     /// Every calculation, in display order.
-    pub fn all() -> [FinCalc; 5] {
+    pub fn all() -> [FinCalc; 7] {
         [
             FinCalc::Compound,
             FinCalc::Loan,
             FinCalc::Simple,
             FinCalc::Margin,
-            FinCalc::Depreciation,
+            FinCalc::DepreciationSln,
+            FinCalc::DepreciationSyd,
+            FinCalc::DepreciationDdb,
         ]
     }
 
@@ -110,7 +125,9 @@ impl FinCalc {
             FinCalc::Loan => "Loan Payment",
             FinCalc::Simple => "Simple Interest",
             FinCalc::Margin => "Gross Margin",
-            FinCalc::Depreciation => "Depreciation",
+            FinCalc::DepreciationSln => "Depreciation (straight-line)",
+            FinCalc::DepreciationSyd => "Depreciation (sum-of-years)",
+            FinCalc::DepreciationDdb => "Depreciation (declining-bal.)",
         }
     }
 
@@ -121,7 +138,9 @@ impl FinCalc {
             FinCalc::Loan => "loan",
             FinCalc::Simple => "simple",
             FinCalc::Margin => "margin",
-            FinCalc::Depreciation => "depreciation",
+            FinCalc::DepreciationSln => "depreciation-sln",
+            FinCalc::DepreciationSyd => "depreciation-syd",
+            FinCalc::DepreciationDdb => "depreciation-ddb",
         }
     }
 
@@ -133,7 +152,12 @@ impl FinCalc {
             "loan" => FinCalc::Loan,
             "simple" => FinCalc::Simple,
             "margin" => FinCalc::Margin,
-            "depreciation" => FinCalc::Depreciation,
+            "depreciation-sln" => FinCalc::DepreciationSln,
+            "depreciation-syd" => FinCalc::DepreciationSyd,
+            "depreciation-ddb" => FinCalc::DepreciationDdb,
+            // Legacy key from before depreciation split into three methods; the
+            // old single "Depreciation" was sum-of-years'-digits.
+            "depreciation" => FinCalc::DepreciationSyd,
             _ => FinCalc::Compound,
         }
     }
@@ -145,7 +169,9 @@ impl FinCalc {
             FinCalc::Loan => "Payment / period",
             FinCalc::Simple => "Interest",
             FinCalc::Margin => "Sale price",
-            FinCalc::Depreciation => "Depreciation (SYD)",
+            FinCalc::DepreciationSln => "Depreciation (SLN)",
+            FinCalc::DepreciationSyd => "Depreciation (SYD)",
+            FinCalc::DepreciationDdb => "Depreciation (DDB)",
         }
     }
 
@@ -156,7 +182,9 @@ impl FinCalc {
             FinCalc::Loan => &LOAN_FIELDS,
             FinCalc::Simple => &SIMPLE_FIELDS,
             FinCalc::Margin => &MARGIN_FIELDS,
-            FinCalc::Depreciation => &DEPRECIATION_FIELDS,
+            FinCalc::DepreciationSln => &DEPRECIATION_SLN_FIELDS,
+            FinCalc::DepreciationSyd => &DEPRECIATION_PERIOD_FIELDS,
+            FinCalc::DepreciationDdb => &DEPRECIATION_PERIOD_FIELDS,
         }
     }
 }
@@ -331,12 +359,25 @@ impl FinState {
                 let margin = self.parse_field(1) / 100.0;
                 crate::financial::gross_margin_price(cost, margin)
             }
-            FinCalc::Depreciation => {
+            FinCalc::DepreciationSln => {
+                let cost = self.parse_field(0);
+                let salvage = self.parse_field(1);
+                let life = self.parse_field(2);
+                crate::financial::depreciation_sln(cost, salvage, life)
+            }
+            FinCalc::DepreciationSyd => {
                 let cost = self.parse_field(0);
                 let salvage = self.parse_field(1);
                 let life = self.parse_field(2);
                 let period = self.parse_field(3);
                 crate::financial::depreciation_syd(cost, salvage, life, period)
+            }
+            FinCalc::DepreciationDdb => {
+                let cost = self.parse_field(0);
+                let salvage = self.parse_field(1);
+                let life = self.parse_field(2);
+                let period = self.parse_field(3);
+                crate::financial::depreciation_ddb(cost, salvage, life, period)
             }
         };
         Some(r)
@@ -443,14 +484,46 @@ mod tests {
     }
 
     #[test]
-    fn depreciation_compute() {
-        let mut s = FinState::new(FinCalc::Depreciation);
+    fn depreciation_sln_compute() {
+        let mut s = FinState::new(FinCalc::DepreciationSln);
+        enter(&mut s, 0, "1000");
+        enter(&mut s, 1, "100");
+        enter(&mut s, 2, "5");
+        let got = s.compute().unwrap().unwrap();
+        assert!(close(got, 180.0, 1e-6), "got {got}");
+    }
+
+    #[test]
+    fn depreciation_syd_compute() {
+        let mut s = FinState::new(FinCalc::DepreciationSyd);
         enter(&mut s, 0, "1000");
         enter(&mut s, 1, "100");
         enter(&mut s, 2, "5");
         enter(&mut s, 3, "1");
         let got = s.compute().unwrap().unwrap();
         assert!(close(got, 300.0, 1e-6), "got {got}");
+    }
+
+    #[test]
+    fn depreciation_ddb_compute() {
+        let mut s = FinState::new(FinCalc::DepreciationDdb);
+        enter(&mut s, 0, "1000");
+        enter(&mut s, 1, "100");
+        enter(&mut s, 2, "5");
+        enter(&mut s, 3, "1");
+        let got = s.compute().unwrap().unwrap();
+        assert!(close(got, 400.0, 1e-6), "got {got}");
+    }
+
+    #[test]
+    fn depreciation_ddb_last_period() {
+        let mut s = FinState::new(FinCalc::DepreciationDdb);
+        enter(&mut s, 0, "1000");
+        enter(&mut s, 1, "100");
+        enter(&mut s, 2, "5");
+        enter(&mut s, 3, "5");
+        let got = s.compute().unwrap().unwrap();
+        assert!(close(got, 29.6, 1e-6), "got {got}");
     }
 
     #[test]
@@ -473,8 +546,20 @@ mod tests {
     }
 
     #[test]
-    fn fresh_depreciation_is_incomplete() {
-        let s = FinState::new(FinCalc::Depreciation);
+    fn fresh_depreciation_sln_is_incomplete() {
+        let s = FinState::new(FinCalc::DepreciationSln);
+        assert!(s.compute().is_none());
+    }
+
+    #[test]
+    fn fresh_depreciation_syd_is_incomplete() {
+        let s = FinState::new(FinCalc::DepreciationSyd);
+        assert!(s.compute().is_none());
+    }
+
+    #[test]
+    fn fresh_depreciation_ddb_is_incomplete() {
+        let s = FinState::new(FinCalc::DepreciationDdb);
         assert!(s.compute().is_none());
     }
 
