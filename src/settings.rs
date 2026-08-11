@@ -26,6 +26,7 @@ const KEY_PROG_BASE: &str = "prog-base";
 const KEY_PROG_BIT_WIDTH: &str = "prog-bit-width";
 const KEY_PROG_SIGNED: &str = "prog-signed";
 const KEY_LAST_CALC_MODE: &str = "last-calc-mode";
+const KEY_FIN_CALC: &str = "fin-calc";
 
 /// Open the settings store, or `None` when the schema isn't installed.
 ///
@@ -234,5 +235,20 @@ pub fn prog_signed() -> bool {
 pub fn set_prog_signed(v: bool) {
     if let Some(s) = settings() {
         let _ = s.set_boolean(KEY_PROG_SIGNED, v);
+    }
+}
+
+/// The saved financial-mode calculator, defaulting to compound interest.
+pub fn fin_calc() -> crate::fin_state::FinCalc {
+    let raw = settings()
+        .map(|s| s.string(KEY_FIN_CALC).to_string())
+        .unwrap_or_else(|| "compound".to_string());
+    crate::fin_state::FinCalc::from_key(&raw)
+}
+
+/// Persist the financial-mode calculator (best-effort).
+pub fn set_fin_calc(calc: crate::fin_state::FinCalc) {
+    if let Some(s) = settings() {
+        let _ = s.set_string(KEY_FIN_CALC, calc.key());
     }
 }

@@ -87,6 +87,20 @@ pub struct Ui {
     prog_signed_btn: gtk::ToggleButton,
     /// The programmer-mode expression / error line.
     prog_expr_label: gtk::Label,
+    /// Financial-mode state (selected calculator + per-field input strings).
+    fin: Rc<RefCell<crate::fin_state::FinState>>,
+    /// The financial calculator picker.
+    fin_calc_row: adw::ComboRow,
+    /// The PreferencesGroup holding the per-field input rows (rebuilt on calc change).
+    fin_field_group: adw::PreferencesGroup,
+    /// The flat, selectable per-field rows (rebuilt on calc change), field order.
+    fin_field_rows: Rc<RefCell<Vec<gtk::Button>>>,
+    /// The per-field VALUE labels, same index order, for the render pass.
+    fin_field_values: Rc<RefCell<Vec<gtk::Label>>>,
+    /// The financial result row's value label.
+    fin_result_label: gtk::Label,
+    /// The financial result row (its title tracks the selected calculator).
+    fin_result_row: adw::ActionRow,
     /// The last calculator-family mode ("calculator" or "programmer") we were
     /// in before entering the converter, so the Convert toggle can return there.
     last_calc_mode: Rc<RefCell<String>>,
@@ -368,6 +382,130 @@ impl Ui {
             }
         }
     }
+
+    /// Redraw the financial-mode page from FinState. Borrow-safe: no RefCell
+    /// borrow is held across any widget setter.
+    fn render_fin(&self) {
+        // Read everything needed into locals, then drop the borrow.
+        let (values, active, result, result_title) = {
+            let st = self.fin.borrow();
+            let n = st.selected().fields().len();
+            let values: Vec<String> = (0..n).map(|i| st.field_value(i).to_string()).collect();
+            (values, st.active(), st.compute(), st.selected().result_label())
+        };
+        self.fin_result_row.set_title(result_title);
+
+        // Value labels: show the raw string, or a dim "0" when empty.
+        let labels = self.fin_field_values.borrow();
+        for (i, label) in labels.iter().enumerate() {
+            let text = match values.get(i) {
+                Some(s) if !s.is_empty() => s.clone(),
+                _ => "0".to_string(),
+            };
+            label.set_text(&text);
+        }
+        drop(labels);
+
+        // Highlight the active field row with `.calc-primary`.
+        let rows = self.fin_field_rows.borrow();
+        for (i, row) in rows.iter().enumerate() {
+            if i == active {
+                row.add_css_class("calc-primary");
+            } else {
+                row.remove_css_class("calc-primary");
+            }
+        }
+        drop(rows);
+
+        // Result: Ok → locale-formatted; Err → the error message + error class.
+        match result {
+            Ok(v) => {
+                self.fin_result_label.remove_css_class("calc-error");
+                self.fin_result_label
+                    .set_text(&crate::engine::format::format_result_locale(v, self.locale()));
+            }
+            Err(e) => {
+                self.fin_result_label.add_css_class("calc-error");
+                self.fin_result_label.set_text(&e.to_string());
+            }
+        }
+    }
+
+    /// Rebuild the per-field input rows for the currently selected calculator.
+    /// Called on startup and whenever the calculator picker changes.
+    fn fin_rebuild_fields(&self) {
+        // Read the selected calc's fields (they're &'static) with a short borrow.
+        let fields: &'static [crate::fin_state::FinField] = {
+            let st = self.fin.borrow();
+            st.selected().fields()
+        };
+
+        // Remove the old rows from the group.
+        {
+            let old = self.fin_field_rows.borrow();
+            for row in old.iter() {
+                self.fin_field_group.remove(row);
+            }
+        }
+
+        // Build fresh rows + value labels.
+        let mut new_rows: Vec<gtk::Button> = Vec::with_capacity(fields.len());
+        let mut new_values: Vec<gtk::Label> = Vec::with_capacity(fields.len());
+        for (idx, field) in fields.iter().enumerate() {
+            let name_label = gtk::Label::builder()
+                .label(field.label)
+                .css_classes(["calc-fin-label"])
+                .halign(gtk::Align::Start)
+                .xalign(0.0)
+                .build();
+            let value_label = gtk::Label::builder()
+                .label("0")
+                .css_classes(["calc-fin-value"])
+                .halign(gtk::Align::End)
+                .hexpand(true)
+                .xalign(1.0)
+                .single_line_mode(true)
+                .ellipsize(gtk::pango::EllipsizeMode::Start)
+                .build();
+            let suffix_label = gtk::Label::builder()
+                .label(field.suffix)
+                .css_classes(["calc-fin-suffix"])
+                .halign(gtk::Align::End)
+                .build();
+            let row_box = gtk::Box::builder()
+                .orientation(gtk::Orientation::Horizontal)
+                .spacing(8)
+                .build();
+            row_box.append(&name_label);
+            row_box.append(&value_label);
+            row_box.append(&suffix_label);
+            let row_btn = gtk::Button::builder()
+                .css_classes(["calc-fin-row", "flat"])
+                .can_focus(false)
+                .hexpand(true)
+                .child(&row_box)
+                .build();
+            row_btn.connect_clicked(clone!(
+                #[weak(rename_to = ui)]
+                self,
+                #[upgrade_or_default]
+                move |_| {
+                    {
+                        let mut st = ui.fin.borrow_mut();
+                        st.set_active(idx);
+                    }
+                    ui.render_fin();
+                }
+            ));
+            self.fin_field_group.add(&row_btn);
+            new_rows.push(row_btn);
+            new_values.push(value_label);
+        }
+
+        *self.fin_field_rows.borrow_mut() = new_rows;
+        *self.fin_field_values.borrow_mut() = new_values;
+        self.render_fin();
+    }
 }
 
 /// Converter page state — deliberately separate from the `Calculator` state
@@ -612,6 +750,34 @@ pub fn build_ui(app: &adw::Application) {
         .ellipsize(gtk::pango::EllipsizeMode::Start)
         .build();
 
+    // ── Financial-mode widgets (built before `ui` so its fields are live) ──
+    let fin = Rc::new(RefCell::new(crate::fin_state::FinState::new(
+        settings::fin_calc(),
+    )));
+    let fin_calc_names: Vec<&str> = crate::fin_state::FinCalc::all()
+        .iter()
+        .map(|c| c.title())
+        .collect();
+    let fin_calc_model = gtk::StringList::new(&fin_calc_names);
+    let fin_calc_row = adw::ComboRow::builder()
+        .title("Calculator")
+        .model(&fin_calc_model)
+        .build();
+    let fin_field_group = adw::PreferencesGroup::builder().build();
+    let fin_result_label = gtk::Label::builder()
+        .label("0")
+        .css_classes(["calc-fin-result"])
+        .halign(gtk::Align::End)
+        .xalign(1.0)
+        .wrap(false)
+        .single_line_mode(true)
+        .ellipsize(gtk::pango::EllipsizeMode::Start)
+        .build();
+    let fin_result_row = adw::ActionRow::builder()
+        .title(settings::fin_calc().result_label())
+        .build();
+    fin_result_row.add_suffix(&fin_result_label);
+
     let ui = Ui {
         calc: calc.clone(),
         history: history.clone(),
@@ -651,6 +817,13 @@ pub fn build_ui(app: &adw::Application) {
         prog_width_btns: Rc::new(prog_width_btns_v.clone()),
         prog_signed_btn: prog_signed_btn.clone(),
         prog_expr_label: prog_expr_label.clone(),
+        fin: fin.clone(),
+        fin_calc_row: fin_calc_row.clone(),
+        fin_field_group: fin_field_group.clone(),
+        fin_field_rows: Rc::new(RefCell::new(Vec::new())),
+        fin_field_values: Rc::new(RefCell::new(Vec::new())),
+        fin_result_label: fin_result_label.clone(),
+        fin_result_row: fin_result_row.clone(),
         last_calc_mode: Rc::new(RefCell::new(String::from("calculator"))),
         convert_btn: convert_btn.clone(),
     };
@@ -731,9 +904,8 @@ pub fn build_ui(app: &adw::Application) {
     let mode_section = gio::Menu::new();
     mode_section.append(Some("Calculator"), Some("calc.mode::calculator"));
     mode_section.append(Some("Programmer"), Some("calc.mode::programmer"));
+    mode_section.append(Some("Financial"), Some("calc.mode::financial"));
     // Convert lives in a dedicated header toggle button, not this radio menu.
-    // Future calculator-family modes (e.g. "Financial") go here, one line each:
-    //   mode_section.append(Some("Financial"), Some("calc.mode::financial"));
     menu_model.append_section(Some("Mode"), &mode_section);
 
     let ops_section = gio::Menu::new();
@@ -929,6 +1101,8 @@ pub fn build_ui(app: &adw::Application) {
         &prog_expr_label,
     );
     content_stack.add_titled(&programmer_page, Some("programmer"), "Programmer");
+    let financial_page = build_financial_page(&ui, &fin_calc_row, &fin_field_group, &fin_result_row);
+    content_stack.add_titled(&financial_page, Some("financial"), "Financial");
 
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
@@ -985,6 +1159,7 @@ pub fn build_ui(app: &adw::Application) {
     ui.render();
     ui.prog_sync_digit_sensitivity();
     ui.render_prog();
+    ui.render_fin();
     // Restore the saved top-level mode (stack child, title, history-btn
     // visibility, radio state, and a re-render of the active page).
     // Seed the Convert-toggle return target from persistence FIRST, so if the
@@ -996,6 +1171,7 @@ pub fn build_ui(app: &adw::Application) {
     let saved_mode = match saved_mode.as_str() {
         "converter" => "converter",
         "programmer" => "programmer",
+        "financial" => "financial",
         _ => "calculator",
     };
     ui.mode_action.set_state(&saved_mode.to_variant());
@@ -1447,6 +1623,7 @@ fn switch_mode(ui: &Ui, mode: &str) {
     let title = match mode {
         "converter" => "Convert",
         "programmer" => "Programmer",
+        "financial" => "Financial",
         _ => "Calculator",
     };
     ui.window_title.set_title(title);
@@ -1477,6 +1654,7 @@ fn switch_mode(ui: &Ui, mode: &str) {
             converter_refresh(ui, &top, &bottom);
         }
         "programmer" => ui.render_prog(),
+        "financial" => ui.render_fin(),
         _ => ui.render(),
     }
 }
@@ -2219,6 +2397,193 @@ fn prog_op_btn(ui: &Ui, label: &str, sym: &str, class: &str) -> gtk::Button {
     btn
 }
 
+/// Assemble the financial-mode page: a calculator picker (ComboRow), a
+/// dynamically-rebuilt group of per-field input rows, a result row, and a
+/// reduced numeric keypad. Returns the page root widget.
+#[allow(clippy::too_many_arguments)]
+fn build_financial_page(
+    ui: &Ui,
+    calc_row: &adw::ComboRow,
+    field_group: &adw::PreferencesGroup,
+    result_row: &adw::ActionRow,
+) -> gtk::Widget {
+    // Seed the picker from persistence.
+    let cur = settings::fin_calc();
+    let cur_idx = crate::fin_state::FinCalc::all()
+        .iter()
+        .position(|c| *c == cur)
+        .unwrap_or(0) as u32;
+    calc_row.set_selected(cur_idx);
+
+    calc_row.connect_selected_notify(clone!(
+        #[weak]
+        ui,
+        #[upgrade_or_default]
+        move |row| {
+            let all = crate::fin_state::FinCalc::all();
+            let new_calc = all[(row.selected() as usize).min(all.len() - 1)];
+            {
+                let mut st = ui.fin.borrow_mut();
+                st.select(new_calc);
+            }
+            settings::set_fin_calc(new_calc);
+            ui.fin_rebuild_fields();
+        }
+    ));
+
+    let calc_group = adw::PreferencesGroup::builder().build();
+    calc_group.add(calc_row);
+
+    let result_group = adw::PreferencesGroup::builder().build();
+    result_group.add(result_row);
+
+    // ── Reduced numeric keypad ───────────────────────────────────────────
+    let pad = gtk::Grid::builder()
+        .row_spacing(8)
+        .column_spacing(8)
+        .row_homogeneous(true)
+        .column_homogeneous(true)
+        .margin_start(12)
+        .margin_end(12)
+        .margin_bottom(16)
+        .build();
+
+    // A keypad button whose action is a plain `fn` pointer mutating FinState.
+    let fin_key = |label: &str, class: &str, mutate: fn(&mut crate::fin_state::FinState)| -> gtk::Button {
+        let btn = gtk::Button::builder()
+            .label(label)
+            .css_classes(["calc-btn", class])
+            .hexpand(true)
+            .vexpand(false)
+            .can_focus(false)
+            .build();
+        btn.connect_clicked(clone!(
+            #[weak]
+            ui,
+            #[upgrade_or_default]
+            move |_| {
+                {
+                    let mut st = ui.fin.borrow_mut();
+                    mutate(&mut st);
+                }
+                ui.render_fin();
+            }
+        ));
+        btn
+    };
+
+    // A digit button (closure captures the char, so it's a separate builder).
+    let digit = |d: char| -> gtk::Button {
+        let btn = gtk::Button::builder()
+            .label(d.to_string())
+            .css_classes(["calc-btn", "calc-digit"])
+            .hexpand(true)
+            .vexpand(false)
+            .can_focus(false)
+            .build();
+        btn.connect_clicked(clone!(
+            #[weak]
+            ui,
+            #[upgrade_or_default]
+            move |_| {
+                {
+                    let mut st = ui.fin.borrow_mut();
+                    st.press_digit(d);
+                }
+                ui.render_fin();
+            }
+        ));
+        btn
+    };
+
+    // Backspace (icon).
+    let back = gtk::Button::builder()
+        .icon_name("edit-clear-symbolic")
+        .css_classes(["calc-btn", "calc-function"])
+        .hexpand(true)
+        .vexpand(false)
+        .can_focus(false)
+        .build();
+    back.connect_clicked(clone!(
+        #[weak]
+        ui,
+        #[upgrade_or_default]
+        move |_| {
+            {
+                let mut st = ui.fin.borrow_mut();
+                st.backspace();
+            }
+            ui.render_fin();
+        }
+    ));
+
+    // Equals — compute is live; equals just refreshes.
+    let equals = gtk::Button::builder()
+        .label("=")
+        .css_classes(["calc-btn", "calc-equals"])
+        .hexpand(true)
+        .vexpand(false)
+        .can_focus(false)
+        .build();
+    equals.connect_clicked(clone!(
+        #[weak]
+        ui,
+        #[upgrade_or_default]
+        move |_| {
+            ui.render_fin();
+        }
+    ));
+
+    // Row 0: 7 8 9 AC
+    pad.attach(&digit('7'), 0, 0, 1, 1);
+    pad.attach(&digit('8'), 1, 0, 1, 1);
+    pad.attach(&digit('9'), 2, 0, 1, 1);
+    pad.attach(&fin_key("AC", "calc-clear", |s| s.clear_all()), 3, 0, 1, 1);
+    // Row 1: 4 5 6 ⌫
+    pad.attach(&digit('4'), 0, 1, 1, 1);
+    pad.attach(&digit('5'), 1, 1, 1, 1);
+    pad.attach(&digit('6'), 2, 1, 1, 1);
+    pad.attach(&back, 3, 1, 1, 1);
+    // Row 2: 1 2 3 C
+    pad.attach(&digit('1'), 0, 2, 1, 1);
+    pad.attach(&digit('2'), 1, 2, 1, 1);
+    pad.attach(&digit('3'), 2, 2, 1, 1);
+    pad.attach(&fin_key("C", "calc-function", |s| s.clear_active()), 3, 2, 1, 1);
+    // Row 3: 0 . ± =
+    pad.attach(&digit('0'), 0, 3, 1, 1);
+    pad.attach(&fin_key(".", "calc-digit", |s| s.press_dot()), 1, 3, 1, 1);
+    pad.attach(&fin_key("\u{00B1}", "calc-function", |s| s.press_negate()), 2, 3, 1, 1);
+    pad.attach(&equals, 3, 3, 1, 1);
+
+    let content = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(16)
+        .margin_start(12)
+        .margin_end(12)
+        .margin_top(8)
+        .margin_bottom(16)
+        .build();
+    content.append(&calc_group);
+    content.append(field_group);
+    content.append(&result_group);
+    content.append(&pad);
+
+    let scroller = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .vexpand(true)
+        .child(&content)
+        .build();
+
+    let clamp = adw::Clamp::builder()
+        .maximum_size(480)
+        .child(&scroller)
+        .build();
+
+    // Build the initial calc's field rows (also renders).
+    ui.fin_rebuild_fields();
+    clamp.upcast::<gtk::Widget>()
+}
+
 /// Assemble the programmer-mode page: a fixed-height base-display block (Hex/
 /// Dec/Oct/Bin), a controls strip (bit-width segmented toggles + signed toggle),
 /// the expression line, and a 5-column keypad. Returns the page root widget.
@@ -2669,6 +3034,44 @@ fn install_key_controller(ui: &Ui, window: &adw::ApplicationWindow) {
                                 ui.converter.borrow_mut().input.clear();
                             }
                             converter_refresh(&ui, &ui.conv_top_label, &ui.conv_bottom_label);
+                            glib::Propagation::Stop
+                        }
+                        _ => glib::Propagation::Proceed,
+                    }
+                }
+                Some("financial") => {
+                    if let Some(ch) = keyval.to_unicode() {
+                        match ch {
+                            '0'..='9' => {
+                                { let mut st = ui.fin.borrow_mut(); st.press_digit(ch); }
+                                ui.render_fin();
+                                return glib::Propagation::Stop;
+                            }
+                            '.' | ',' => {
+                                { let mut st = ui.fin.borrow_mut(); st.press_dot(); }
+                                ui.render_fin();
+                                return glib::Propagation::Stop;
+                            }
+                            '=' => {
+                                ui.render_fin();
+                                return glib::Propagation::Stop;
+                            }
+                            _ => {}
+                        }
+                    }
+                    match keyval {
+                        gdk::Key::Return | gdk::Key::KP_Enter => {
+                            ui.render_fin();
+                            glib::Propagation::Stop
+                        }
+                        gdk::Key::BackSpace => {
+                            { let mut st = ui.fin.borrow_mut(); st.backspace(); }
+                            ui.render_fin();
+                            glib::Propagation::Stop
+                        }
+                        gdk::Key::Escape | gdk::Key::Delete => {
+                            { let mut st = ui.fin.borrow_mut(); st.clear_all(); }
+                            ui.render_fin();
                             glib::Propagation::Stop
                         }
                         _ => glib::Propagation::Proceed,
