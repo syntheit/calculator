@@ -27,6 +27,7 @@ const KEY_PROG_BIT_WIDTH: &str = "prog-bit-width";
 const KEY_PROG_SIGNED: &str = "prog-signed";
 const KEY_LAST_CALC_MODE: &str = "last-calc-mode";
 const KEY_FIN_CALC: &str = "fin-calc";
+const KEY_DATE_FUNC: &str = "date-func";
 
 /// Open the settings store, or `None` when the schema isn't installed.
 ///
@@ -250,5 +251,19 @@ pub fn fin_calc() -> crate::fin_state::FinCalc {
 pub fn set_fin_calc(calc: crate::fin_state::FinCalc) {
     if let Some(s) = settings() {
         let _ = s.set_string(KEY_FIN_CALC, calc.key());
+    }
+}
+
+/// The saved date-mode function, defaulting to "difference".
+pub fn date_func() -> String {
+    settings()
+        .map(|s| s.string(KEY_DATE_FUNC).to_string())
+        .unwrap_or_else(|| "difference".to_string())
+}
+
+/// Persist the date-mode function (best-effort).
+pub fn set_date_func(f: &str) {
+    if let Some(s) = settings() {
+        let _ = s.set_string(KEY_DATE_FUNC, f);
     }
 }

@@ -43,9 +43,18 @@
         <choice value="converter"/>
         <choice value="programmer"/>
         <choice value="financial"/>
+        <choice value="date"/>
       </choices>
       <default>"calculator"</default>
       <summary>The active top-level mode (calculator or converter)</summary>
+    </key>
+    <key name="date-func" type="s">
+      <choices>
+        <choice value="difference"/>
+        <choice value="addsub"/>
+      </choices>
+      <default>"difference"</default>
+      <summary>Last-used date-mode function</summary>
     </key>
     <key name="prog-base" type="s">
       <choices>
@@ -81,6 +90,7 @@
         <choice value="calculator"/>
         <choice value="programmer"/>
         <choice value="financial"/>
+        <choice value="date"/>
       </choices>
       <default>"calculator"</default>
       <summary>The calculator-family mode to return to when leaving the converter</summary>

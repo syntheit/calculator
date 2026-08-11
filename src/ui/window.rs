@@ -106,6 +106,25 @@ pub struct Ui {
     last_calc_mode: Rc<RefCell<String>>,
     /// The header Convert toggle button (active iff the converter page shows).
     convert_btn: gtk::ToggleButton,
+    /// Date-mode state (add/subtract day-count input + sign). The dates
+    /// themselves live in the calendar widgets and are read via `.date()`.
+    date: Rc<RefCell<DateState>>,
+    /// The "Difference between dates" From/To calendars.
+    date_from_cal: gtk::Calendar,
+    date_to_cal: gtk::Calendar,
+    /// The "Add or subtract days" base calendar.
+    date_base_cal: gtk::Calendar,
+    /// Difference-function result labels: signed day count, calendar-aware
+    /// years/months/days breakdown, and the two weekdays.
+    date_diff_days_label: gtk::Label,
+    date_diff_ymd_label: gtk::Label,
+    date_diff_weekday_label: gtk::Label,
+    /// Add/subtract-function labels: the entered day count and the result.
+    date_count_label: gtk::Label,
+    date_result_label: gtk::Label,
+    /// The date-function picker and the stack swapping the two sub-pages.
+    date_func_combo: adw::ComboRow,
+    date_stack: gtk::Stack,
 }
 
 impl Ui {
@@ -530,6 +549,148 @@ impl Ui {
         *self.fin_field_values.borrow_mut() = new_values;
         self.render_fin();
     }
+
+    /// Read a calendar's currently-shown date into a validated `date_calc::Date`.
+    /// `gtk::Calendar` clamps the day when navigating months, so this should
+    /// always be a real date; an `Err` (never expected) yields `None`.
+    fn cal_date(cal: &gtk::Calendar) -> Option<crate::date_calc::Date> {
+        let dt = cal.date();
+        crate::date_calc::Date::new(
+            dt.year(),
+            dt.month() as u32,
+            dt.day_of_month() as u32,
+        )
+        .ok()
+    }
+
+    /// Recompute the "Difference between dates" result labels from the two
+    /// calendars. Borrow-safe: nothing is borrowed across a widget setter (the
+    /// dates are read out of the widgets into locals up front).
+    fn date_recompute_diff(&self) {
+        let (Some(from), Some(to)) = (
+            Self::cal_date(&self.date_from_cal),
+            Self::cal_date(&self.date_to_cal),
+        ) else {
+            self.date_diff_days_label.set_text("");
+            self.date_diff_ymd_label.set_text("");
+            self.date_diff_weekday_label.set_text("");
+            return;
+        };
+
+        // Signed day count, presented as magnitude with a leading minus.
+        let n = crate::date_calc::days_between(from, to);
+        let mag = n.abs();
+        let sign = if n < 0 { "\u{2212}" } else { "" };
+        let grouped = group_from_right(&mag.to_string(), 3, ',');
+        let mut days_text = format!("{sign}{grouped} days");
+        if mag >= 7 {
+            let weeks = mag / 7;
+            let rem = mag % 7;
+            days_text.push_str(&format!(
+                " ({} weeks {} days)",
+                group_from_right(&weeks.to_string(), 3, ','),
+                rem
+            ));
+        }
+
+        // Calendar-aware years/months/days breakdown (magnitude).
+        let diff = crate::date_calc::diff_ymd(from, to);
+        let mut parts: Vec<String> = Vec::new();
+        if diff.years != 0 {
+            parts.push(format!(
+                "{} year{}",
+                diff.years,
+                if diff.years == 1 { "" } else { "s" }
+            ));
+        }
+        if diff.months != 0 {
+            parts.push(format!(
+                "{} month{}",
+                diff.months,
+                if diff.months == 1 { "" } else { "s" }
+            ));
+        }
+        if diff.days != 0 {
+            parts.push(format!(
+                "{} day{}",
+                diff.days,
+                if diff.days == 1 { "" } else { "s" }
+            ));
+        }
+        let ymd_text = if parts.is_empty() {
+            "0 days".to_string()
+        } else {
+            parts.join(", ")
+        };
+
+        let weekday_text = format!(
+            "From: {}   To: {}",
+            crate::date_calc::weekday(from).name(),
+            crate::date_calc::weekday(to).name()
+        );
+
+        self.date_diff_days_label.set_text(&days_text);
+        self.date_diff_ymd_label.set_text(&ymd_text);
+        self.date_diff_weekday_label.set_text(&weekday_text);
+    }
+
+    /// Recompute the "Add or subtract days" result from the base calendar plus
+    /// the keypad count/sign. Borrow-safe: the DateState borrow is dropped
+    /// before any widget setter runs.
+    fn date_recompute_addsub(&self) {
+        // Read the keypad state into locals, then drop the borrow.
+        let (count_str, sub) = {
+            let st = self.date.borrow();
+            (st.count.clone(), st.sub)
+        };
+        let count: i64 = count_str.parse::<i64>().unwrap_or(0);
+
+        // Display of the entered count: dim "0" when empty, leading minus when
+        // subtracting.
+        let count_label = if count_str.is_empty() {
+            "0".to_string()
+        } else if sub {
+            format!("\u{2212}{count_str}")
+        } else {
+            count_str.clone()
+        };
+        self.date_count_label.set_text(&count_label);
+
+        let Some(base) = Self::cal_date(&self.date_base_cal) else {
+            self.date_result_label.remove_css_class("calc-error");
+            self.date_result_label.set_text("");
+            return;
+        };
+        let signed = if sub { -count } else { count };
+        match crate::date_calc::add_days(base, signed) {
+            Ok(target) => {
+                self.date_result_label.remove_css_class("calc-error");
+                let month = MONTH_NAMES
+                    .get((target.month as usize).wrapping_sub(1))
+                    .copied()
+                    .unwrap_or("");
+                let weekday = crate::date_calc::weekday(target).name();
+                self.date_result_label.set_text(&format!(
+                    "{} {}, {} \u{2014} a {}",
+                    month, target.day, target.year, weekday
+                ));
+            }
+            Err(_) => {
+                self.date_result_label.add_css_class("calc-error");
+                self.date_result_label.set_text("Date out of range");
+            }
+        }
+    }
+
+    /// Recompute whichever Date-mode sub-page is currently showing.
+    fn date_render(&self) {
+        let child = self.date_stack.visible_child_name();
+        if child.as_deref() == Some("addsub") {
+            self.date_recompute_addsub();
+        } else {
+            self.date_recompute_diff();
+        }
+    }
 }
 
 /// Converter page state — deliberately separate from the `Calculator` state
@@ -548,6 +709,30 @@ impl ConverterState {
         self.input.parse::<f64>().unwrap_or(0.0)
     }
 }
+
+/// Date-mode ("Add or subtract days") keypad state. The base date lives in the
+/// `date_base_cal` widget; this only holds the entered day-count. `count` is the
+/// unsigned digit string; `sub` flips the sign (subtract vs add).
+struct DateState {
+    count: String,
+    sub: bool,
+}
+
+/// Full month names, indexed by `month - 1`, for the Date-mode result line.
+const MONTH_NAMES: [&str; 12] = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
 
 /// Index of the unit with `id` within `cat.units()`, or 0 if not found.
 fn category_index_of(cat: crate::convert::Category, id: &str) -> usize {
@@ -802,6 +987,69 @@ pub fn build_ui(app: &adw::Application) {
         .build();
     fin_result_row.add_suffix(&fin_result_label);
 
+    // ── Date-mode widgets (built before `ui` so its fields are live) ──────
+    let date = Rc::new(RefCell::new(DateState {
+        count: String::new(),
+        sub: false,
+    }));
+    let date_from_cal = gtk::Calendar::new();
+    let date_to_cal = gtk::Calendar::new();
+    let date_base_cal = gtk::Calendar::new();
+    // Default every calendar to today (now_local essentially never fails).
+    if let Ok(now) = glib::DateTime::now_local() {
+        date_from_cal.select_day(&now);
+        date_to_cal.select_day(&now);
+        date_base_cal.select_day(&now);
+    }
+    let date_diff_days_label = gtk::Label::builder()
+        .label("")
+        .css_classes(["calc-fin-result"])
+        .halign(gtk::Align::Center)
+        .justify(gtk::Justification::Center)
+        .wrap(true)
+        .build();
+    let date_diff_ymd_label = gtk::Label::builder()
+        .label("")
+        .css_classes(["calc-fin-label"])
+        .halign(gtk::Align::Center)
+        .justify(gtk::Justification::Center)
+        .wrap(true)
+        .build();
+    let date_diff_weekday_label = gtk::Label::builder()
+        .label("")
+        .css_classes(["calc-fin-suffix"])
+        .halign(gtk::Align::Center)
+        .justify(gtk::Justification::Center)
+        .wrap(true)
+        .build();
+    let date_count_label = gtk::Label::builder()
+        .label("0")
+        .css_classes(["calc-fin-result"])
+        .halign(gtk::Align::End)
+        .xalign(1.0)
+        .wrap(false)
+        .single_line_mode(true)
+        .ellipsize(gtk::pango::EllipsizeMode::Start)
+        .build();
+    let date_result_label = gtk::Label::builder()
+        .label("")
+        .css_classes(["calc-fin-result"])
+        .halign(gtk::Align::Center)
+        .justify(gtk::Justification::Center)
+        .wrap(true)
+        .build();
+    let date_func_model = gtk::StringList::new(&[
+        "Difference between dates",
+        "Add or subtract days",
+    ]);
+    let date_func_combo = adw::ComboRow::builder()
+        .title("Function")
+        .model(&date_func_model)
+        .build();
+    let date_stack = gtk::Stack::new();
+    date_stack.set_hhomogeneous(false); // CRITICAL anti-regression
+    date_stack.set_vhomogeneous(false); // CRITICAL anti-regression
+
     let ui = Ui {
         calc: calc.clone(),
         history: history.clone(),
@@ -850,6 +1098,17 @@ pub fn build_ui(app: &adw::Application) {
         fin_result_row: fin_result_row.clone(),
         last_calc_mode: Rc::new(RefCell::new(String::from("calculator"))),
         convert_btn: convert_btn.clone(),
+        date: date.clone(),
+        date_from_cal: date_from_cal.clone(),
+        date_to_cal: date_to_cal.clone(),
+        date_base_cal: date_base_cal.clone(),
+        date_diff_days_label: date_diff_days_label.clone(),
+        date_diff_ymd_label: date_diff_ymd_label.clone(),
+        date_diff_weekday_label: date_diff_weekday_label.clone(),
+        date_count_label: date_count_label.clone(),
+        date_result_label: date_result_label.clone(),
+        date_func_combo: date_func_combo.clone(),
+        date_stack: date_stack.clone(),
     };
 
     // Wire both stateful button sets (each set wired exactly once — no widget
@@ -929,6 +1188,7 @@ pub fn build_ui(app: &adw::Application) {
     mode_section.append(Some("Calculator"), Some("calc.mode::calculator"));
     mode_section.append(Some("Programmer"), Some("calc.mode::programmer"));
     mode_section.append(Some("Financial"), Some("calc.mode::financial"));
+    mode_section.append(Some("Date"), Some("calc.mode::date"));
     // Convert lives in a dedicated header toggle button, not this radio menu.
     menu_model.append_section(Some("Mode"), &mode_section);
 
@@ -1127,6 +1387,8 @@ pub fn build_ui(app: &adw::Application) {
     content_stack.add_titled(&programmer_page, Some("programmer"), "Programmer");
     let financial_page = build_financial_page(&ui, &fin_calc_row, &fin_field_group, &fin_result_row);
     content_stack.add_titled(&financial_page, Some("financial"), "Financial");
+    let date_page = build_date_page(&ui, &date_func_combo, &date_stack);
+    content_stack.add_titled(&date_page, Some("date"), "Date");
 
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
@@ -1196,6 +1458,7 @@ pub fn build_ui(app: &adw::Application) {
         "converter" => "converter",
         "programmer" => "programmer",
         "financial" => "financial",
+        "date" => "date",
         _ => "calculator",
     };
     ui.mode_action.set_state(&saved_mode.to_variant());
@@ -1648,6 +1911,7 @@ fn switch_mode(ui: &Ui, mode: &str) {
         "converter" => "Convert",
         "programmer" => "Programmer",
         "financial" => "Financial",
+        "date" => "Date",
         _ => "Calculator",
     };
     ui.window_title.set_title(title);
@@ -1679,6 +1943,7 @@ fn switch_mode(ui: &Ui, mode: &str) {
         }
         "programmer" => ui.render_prog(),
         "financial" => ui.render_fin(),
+        "date" => ui.date_render(),
         _ => ui.render(),
     }
 }
@@ -2718,6 +2983,303 @@ fn build_financial_page(
     clamp.upcast::<gtk::Widget>()
 }
 
+/// A small heading label for a Date-mode calendar ("From" / "To" / "Base date").
+fn date_heading(text: &str) -> gtk::Label {
+    gtk::Label::builder()
+        .label(text)
+        .css_classes(["calc-fin-label"])
+        .halign(gtk::Align::Start)
+        .xalign(0.0)
+        .build()
+}
+
+/// A Date-mode add/subtract keypad button whose click mutates DateState then
+/// recomputes. `mutate` returns nothing; the sign/count string is the state.
+fn date_key(
+    ui: &Ui,
+    label: &str,
+    class: &str,
+    mutate: fn(&mut DateState),
+) -> gtk::Button {
+    let btn = gtk::Button::builder()
+        .label(label)
+        .css_classes(["calc-btn", class])
+        .hexpand(true)
+        .vexpand(false)
+        .can_focus(false)
+        .build();
+    btn.connect_clicked(clone!(
+        #[weak(rename_to = ui)]
+        ui,
+        #[upgrade_or_default]
+        move |_| {
+            {
+                let mut st = ui.date.borrow_mut();
+                mutate(&mut st);
+            }
+            ui.date_recompute_addsub();
+        }
+    ));
+    btn
+}
+
+/// A Date-mode add/subtract digit button (captures the digit char).
+fn date_digit(ui: &Ui, d: char) -> gtk::Button {
+    let btn = gtk::Button::builder()
+        .label(d.to_string())
+        .css_classes(["calc-btn", "calc-digit"])
+        .hexpand(true)
+        .vexpand(false)
+        .can_focus(false)
+        .build();
+    btn.connect_clicked(clone!(
+        #[weak(rename_to = ui)]
+        ui,
+        #[upgrade_or_default]
+        move |_| {
+            {
+                let mut st = ui.date.borrow_mut();
+                if st.count.len() < 9 {
+                    // Drop a lone leading zero on the next digit.
+                    if st.count == "0" {
+                        st.count.clear();
+                    }
+                    st.count.push(d);
+                }
+            }
+            ui.date_recompute_addsub();
+        }
+    ));
+    btn
+}
+
+/// Assemble the Date-mode page: a function picker (Difference / Add-subtract),
+/// then a non-homogeneous stack swapping the two sub-pages. Returns the page
+/// root widget.
+fn build_date_page(ui: &Ui, func_combo: &adw::ComboRow, stack: &gtk::Stack) -> gtk::Widget {
+    // ── Sub-page 1: "Difference between dates" ───────────────────────────
+    let from_box = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(4)
+        .build();
+    from_box.append(&date_heading("From"));
+    from_box.append(&ui.date_from_cal);
+
+    let to_box = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(4)
+        .build();
+    to_box.append(&date_heading("To"));
+    to_box.append(&ui.date_to_cal);
+
+    let diff_results = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(6)
+        .margin_top(4)
+        .build();
+    diff_results.append(&ui.date_diff_days_label);
+    diff_results.append(&ui.date_diff_ymd_label);
+    diff_results.append(&ui.date_diff_weekday_label);
+
+    let difference_page = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(16)
+        .build();
+    difference_page.append(&from_box);
+    difference_page.append(&to_box);
+    difference_page.append(&diff_results);
+
+    // Recompute live on every calendar interaction (day click AND month/year
+    // navigation, since navigating shifts the widget's shown date).
+    for cal in [&ui.date_from_cal, &ui.date_to_cal] {
+        cal.connect_day_selected(clone!(
+            #[weak(rename_to = ui)]
+            ui,
+            #[upgrade_or_default]
+            move |_| ui.date_recompute_diff()
+        ));
+        cal.connect_next_month(clone!(
+            #[weak(rename_to = ui)]
+            ui,
+            #[upgrade_or_default]
+            move |_| ui.date_recompute_diff()
+        ));
+        cal.connect_prev_month(clone!(
+            #[weak(rename_to = ui)]
+            ui,
+            #[upgrade_or_default]
+            move |_| ui.date_recompute_diff()
+        ));
+        cal.connect_next_year(clone!(
+            #[weak(rename_to = ui)]
+            ui,
+            #[upgrade_or_default]
+            move |_| ui.date_recompute_diff()
+        ));
+        cal.connect_prev_year(clone!(
+            #[weak(rename_to = ui)]
+            ui,
+            #[upgrade_or_default]
+            move |_| ui.date_recompute_diff()
+        ));
+    }
+
+    // ── Sub-page 2: "Add or subtract days" ───────────────────────────────
+    let base_box = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(4)
+        .build();
+    base_box.append(&date_heading("Base date"));
+    base_box.append(&ui.date_base_cal);
+
+    // Count display (non-editable), styled like a display value.
+    let count_row = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(8)
+        .build();
+    count_row.append(&date_heading("Days"));
+    count_row.append(&ui.date_count_label);
+
+    // 3-column round-button keypad, digits + ± + ⌫.
+    let pad = gtk::Grid::builder()
+        .row_spacing(8)
+        .column_spacing(8)
+        .row_homogeneous(true)
+        .column_homogeneous(true)
+        .build();
+    pad.attach(&date_digit(ui, '7'), 0, 0, 1, 1);
+    pad.attach(&date_digit(ui, '8'), 1, 0, 1, 1);
+    pad.attach(&date_digit(ui, '9'), 2, 0, 1, 1);
+    pad.attach(&date_digit(ui, '4'), 0, 1, 1, 1);
+    pad.attach(&date_digit(ui, '5'), 1, 1, 1, 1);
+    pad.attach(&date_digit(ui, '6'), 2, 1, 1, 1);
+    pad.attach(&date_digit(ui, '1'), 0, 2, 1, 1);
+    pad.attach(&date_digit(ui, '2'), 1, 2, 1, 1);
+    pad.attach(&date_digit(ui, '3'), 2, 2, 1, 1);
+    pad.attach(&date_digit(ui, '0'), 0, 3, 1, 1);
+    // ± flips the add/subtract sign.
+    pad.attach(
+        &date_key(ui, "\u{00B1}", "calc-function", |s| s.sub = !s.sub),
+        1,
+        3,
+        1,
+        1,
+    );
+    // ⌫ pops the last digit.
+    pad.attach(
+        &date_key(ui, "\u{232B}", "calc-function", |s| {
+            s.count.pop();
+        }),
+        2,
+        3,
+        1,
+        1,
+    );
+
+    let addsub_results = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(6)
+        .margin_top(4)
+        .build();
+    addsub_results.append(&ui.date_result_label);
+
+    let addsub_page = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(16)
+        .build();
+    addsub_page.append(&base_box);
+    addsub_page.append(&count_row);
+    addsub_page.append(&pad);
+    addsub_page.append(&addsub_results);
+
+    ui.date_base_cal.connect_day_selected(clone!(
+        #[weak(rename_to = ui)]
+        ui,
+        #[upgrade_or_default]
+        move |_| ui.date_recompute_addsub()
+    ));
+    ui.date_base_cal.connect_next_month(clone!(
+        #[weak(rename_to = ui)]
+        ui,
+        #[upgrade_or_default]
+        move |_| ui.date_recompute_addsub()
+    ));
+    ui.date_base_cal.connect_prev_month(clone!(
+        #[weak(rename_to = ui)]
+        ui,
+        #[upgrade_or_default]
+        move |_| ui.date_recompute_addsub()
+    ));
+    ui.date_base_cal.connect_next_year(clone!(
+        #[weak(rename_to = ui)]
+        ui,
+        #[upgrade_or_default]
+        move |_| ui.date_recompute_addsub()
+    ));
+    ui.date_base_cal.connect_prev_year(clone!(
+        #[weak(rename_to = ui)]
+        ui,
+        #[upgrade_or_default]
+        move |_| ui.date_recompute_addsub()
+    ));
+
+    // ── The function stack (NON-homogeneous, set on the shared widget) ────
+    stack.add_named(&difference_page, Some("difference"));
+    stack.add_named(&addsub_page, Some("addsub"));
+
+    // ── The function picker ──────────────────────────────────────────────
+    let cur = settings::date_func();
+    let cur_idx: u32 = if cur == "addsub" { 1 } else { 0 };
+    func_combo.set_selected(cur_idx);
+    stack.set_visible_child_name(if cur_idx == 1 { "addsub" } else { "difference" });
+
+    func_combo.connect_selected_notify(clone!(
+        #[weak(rename_to = ui)]
+        ui,
+        #[upgrade_or_default]
+        move |row| {
+            let (key, child) = if row.selected() == 1 {
+                ("addsub", "addsub")
+            } else {
+                ("difference", "difference")
+            };
+            settings::set_date_func(key);
+            ui.date_stack.set_visible_child_name(child);
+            ui.date_render();
+        }
+    ));
+
+    let picker_group = adw::PreferencesGroup::builder().build();
+    picker_group.add(func_combo);
+
+    // ── Assemble the page: picker + stack, clamped + scrollable ───────────
+    let content = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(16)
+        .margin_start(12)
+        .margin_end(12)
+        .margin_top(8)
+        .margin_bottom(16)
+        .build();
+    content.append(&picker_group);
+    content.append(stack);
+
+    let scroller = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .vexpand(true)
+        .child(&content)
+        .build();
+
+    let clamp = adw::Clamp::builder()
+        .maximum_size(480)
+        .child(&scroller)
+        .build();
+
+    // Initial render of whichever sub-page is showing.
+    ui.date_render();
+    clamp.upcast::<gtk::Widget>()
+}
+
 /// Assemble the programmer-mode page: a fixed-height base-display block (Hex/
 /// Dec/Oct/Bin), a controls strip (bit-width segmented toggles + signed toggle),
 /// the expression line, and a 5-column keypad. Returns the page root widget.
@@ -3216,6 +3778,59 @@ fn install_key_controller(ui: &Ui, window: &adw::ApplicationWindow) {
                         gdk::Key::Escape | gdk::Key::Delete => {
                             { let mut st = ui.fin.borrow_mut(); st.clear_all(); }
                             ui.render_fin();
+                            glib::Propagation::Stop
+                        }
+                        _ => glib::Propagation::Proceed,
+                    }
+                }
+                Some("date") => {
+                    // Only the "Add or subtract days" sub-page has a text entry
+                    // (the day-count keypad). In "Difference between dates" the
+                    // two calendars own their own keyboard navigation, so let
+                    // arrow keys etc. reach the focused calendar.
+                    if ui.date_stack.visible_child_name().as_deref() != Some("addsub") {
+                        return glib::Propagation::Proceed;
+                    }
+                    if let Some(ch) = keyval.to_unicode() {
+                        if ch.is_ascii_digit() {
+                            {
+                                let mut st = ui.date.borrow_mut();
+                                if st.count.len() < 9 {
+                                    // Drop a lone leading zero on the next digit.
+                                    if st.count == "0" {
+                                        st.count.clear();
+                                    }
+                                    st.count.push(ch);
+                                }
+                            }
+                            ui.date_recompute_addsub();
+                            return glib::Propagation::Stop;
+                        }
+                    }
+                    match keyval {
+                        gdk::Key::minus | gdk::Key::KP_Subtract => {
+                            {
+                                let mut st = ui.date.borrow_mut();
+                                st.sub = !st.sub;
+                            }
+                            ui.date_recompute_addsub();
+                            glib::Propagation::Stop
+                        }
+                        gdk::Key::BackSpace => {
+                            {
+                                let mut st = ui.date.borrow_mut();
+                                st.count.pop();
+                            }
+                            ui.date_recompute_addsub();
+                            glib::Propagation::Stop
+                        }
+                        gdk::Key::Escape | gdk::Key::Delete => {
+                            {
+                                let mut st = ui.date.borrow_mut();
+                                st.count.clear();
+                                st.sub = false;
+                            }
+                            ui.date_recompute_addsub();
                             glib::Propagation::Stop
                         }
                         _ => glib::Propagation::Proceed,
