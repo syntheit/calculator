@@ -214,6 +214,40 @@ pub const APP_CSS: &str = "
 .calc-disabled {
     opacity: 0.35;
 }
+
+/* ─── Financial mode ──────────────────────────────────────────────────── */
+
+/* Field rows: flat, with the active field row getting an accent-tinted bg. */
+.calc-fin-row {
+    padding: 4px 8px;
+    border-radius: 8px;
+    background: none;
+}
+.calc-fin-row.calc-primary {
+    background-color: alpha(@accent_bg_color, 0.18);
+}
+.calc-fin-label {
+    opacity: 0.8;
+    color: @window_fg_color;
+}
+.calc-fin-value {
+    font-family: monospace;
+    color: @window_fg_color;
+}
+.calc-fin-suffix {
+    font-size: 0.8em;
+    opacity: 0.5;
+    color: @window_fg_color;
+}
+.calc-fin-result {
+    font-size: 1.4em;
+    font-weight: 500;
+    color: @accent_color;
+    font-family: monospace;
+}
+.calc-fin-result.calc-error {
+    color: @error_color;
+}
 ";
 
 /// Install the app stylesheet. Call once at application startup.

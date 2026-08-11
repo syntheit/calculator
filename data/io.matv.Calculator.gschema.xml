@@ -42,6 +42,7 @@
         <choice value="calculator"/>
         <choice value="converter"/>
         <choice value="programmer"/>
+        <choice value="financial"/>
       </choices>
       <default>"calculator"</default>
       <summary>The active top-level mode (calculator or converter)</summary>
@@ -63,6 +64,17 @@
     <key name="prog-signed" type="b">
       <default>true</default>
       <summary>Whether programmer mode interprets values as signed</summary>
+    </key>
+    <key name="fin-calc" type="s">
+      <choices>
+        <choice value="compound"/>
+        <choice value="loan"/>
+        <choice value="simple"/>
+        <choice value="margin"/>
+        <choice value="depreciation"/>
+      </choices>
+      <default>"compound"</default>
+      <summary>Last-used financial calculator</summary>
     </key>
     <key name="last-calc-mode" type="s">
       <choices>

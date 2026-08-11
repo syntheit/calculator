@@ -9,6 +9,8 @@
 mod app;
 mod convert;
 mod engine;
+mod financial;
+mod fin_state;
 mod history;
 mod programmer;
 mod prog_state;
