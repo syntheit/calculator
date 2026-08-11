@@ -80,6 +80,7 @@
       <choices>
         <choice value="calculator"/>
         <choice value="programmer"/>
+        <choice value="financial"/>
       </choices>
       <default>"calculator"</default>
       <summary>The calculator-family mode to return to when leaving the converter</summary>

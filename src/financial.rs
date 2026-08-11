@@ -226,7 +226,8 @@ pub fn depreciation_sln(cost: f64, salvage: f64, life: f64) -> Result<f64, FinEr
 /// Sum-of-years'-digits depreciation (GNOME `Syd`):
 /// `(cost - salvage) * (life - period + 1) / (life * (life + 1) / 2)`.
 ///
-/// Errors [`FinError::DivByZero`] when `life == 0`.
+/// `life` must be positive, else [`FinError::DivByZero`]. `period` must be an
+/// integer in `1..=life`, else [`FinError::Invalid`].
 pub fn depreciation_syd(
     cost: f64,
     salvage: f64,
@@ -234,8 +235,12 @@ pub fn depreciation_syd(
     period: f64,
 ) -> Result<f64, FinError> {
     check_finite(&[cost, salvage, life, period])?;
-    if life == 0.0 {
+    if life <= 0.0 {
         return Err(FinError::DivByZero);
+    }
+    // period must be a positive integer within 1..=life
+    if period.fract() != 0.0 || period < 1.0 || period > life {
+        return Err(FinError::Invalid);
     }
     finite((cost - salvage) * (life - period + 1.0) / (life * (life + 1.0) / 2.0))
 }
@@ -243,27 +248,29 @@ pub fn depreciation_syd(
 /// Double-declining-balance depreciation (GNOME `Ddb`).
 ///
 /// Iterates `period` times, each step depreciating `2/life` of the remaining
-/// book value, and returns the last step's amount. `period` is truncated to an
-/// integer loop count via `period as i64` (truncates toward zero), so a
-/// fractional `period` uses its integer part. A `period` of `0` runs the loop
-/// zero times and yields `0.0`.
+/// book value, clamped so the book value never drops below `salvage`, and
+/// returns the last step's amount.
 ///
-/// Errors: [`FinError::DivByZero`] when `life == 0`; [`FinError::Invalid`] when
-/// `period < 0`.
-pub fn depreciation_ddb(cost: f64, life: f64, period: f64) -> Result<f64, FinError> {
-    check_finite(&[cost, life, period])?;
-    if life == 0.0 {
+/// `life` must be positive, else [`FinError::DivByZero`]. `period` must be an
+/// integer in `1..=life`, else [`FinError::Invalid`].
+pub fn depreciation_ddb(cost: f64, salvage: f64, life: f64, period: f64) -> Result<f64, FinError> {
+    check_finite(&[cost, salvage, life, period])?;
+    if life <= 0.0 {
         return Err(FinError::DivByZero);
     }
-    if period < 0.0 {
+    // period must be a positive integer within 1..=life
+    if period.fract() != 0.0 || period < 1.0 || period > life {
         return Err(FinError::Invalid);
     }
+    let rate = 2.0 / life;
     let count = period as i64;
-    let mut bv = 0.0;
+    let mut bv = cost;
     let mut z = 0.0;
     for _ in 0..count {
-        z = (cost - bv) * 2.0 / life;
-        bv += z;
+        // Depreciate `rate` of the remaining book value, but never take the
+        // book value below salvage.
+        z = (rate * bv).min((bv - salvage).max(0.0));
+        bv -= z;
     }
     finite(z)
 }
@@ -354,15 +361,35 @@ mod tests {
     }
 
     #[test]
-    fn depreciation_ddb_golden() {
-        assert!(close(depreciation_ddb(1000.0, 5.0, 1.0).unwrap(), 400.0, 1e-9));
-        assert!(close(depreciation_ddb(1000.0, 5.0, 2.0).unwrap(), 240.0, 1e-9));
+    fn depreciation_syd_invalid_period() {
+        // Blank period (UI maps blank -> 0) is invalid.
+        assert!(depreciation_syd(1000.0, 100.0, 5.0, 0.0).is_err());
+        // period > life is invalid.
+        assert!(depreciation_syd(1000.0, 100.0, 5.0, 6.0).is_err());
+        // Non-integer period is invalid.
+        assert!(depreciation_syd(1000.0, 100.0, 5.0, 2.5).is_err());
+        // Valid period still works.
+        assert!(close(
+            depreciation_syd(1000.0, 100.0, 5.0, 1.0).unwrap(),
+            300.0,
+            1e-9
+        ));
     }
 
     #[test]
-    #[allow(clippy::float_cmp)]
+    fn depreciation_ddb_golden() {
+        // cost 1000, salvage 100, life 5, rate = 0.4
+        assert!(close(depreciation_ddb(1000.0, 100.0, 5.0, 1.0).unwrap(), 400.0, 1e-9));
+        assert!(close(depreciation_ddb(1000.0, 100.0, 5.0, 2.0).unwrap(), 240.0, 1e-9));
+        // Final period is clamped so book value never drops below salvage:
+        // book at start of period 5 is 129.6, clamped depreciation = 29.6.
+        assert!(close(depreciation_ddb(1000.0, 100.0, 5.0, 5.0).unwrap(), 29.6, 1e-9));
+    }
+
+    #[test]
     fn depreciation_ddb_period_zero() {
-        assert_eq!(depreciation_ddb(1000.0, 5.0, 0.0).unwrap(), 0.0);
+        // Blank period (UI maps blank -> 0) is now invalid.
+        assert!(depreciation_ddb(1000.0, 100.0, 5.0, 0.0).is_err());
     }
 
     #[test]
@@ -374,8 +401,8 @@ mod tests {
         assert!(compound_pv(100.0, f64::INFINITY, 10.0).is_err());
         assert!(annuity_n(0.0, 100.0, 0.05).is_err());
         assert!(annuity_n(100.0, 100.0, 0.0).is_err());
-        assert!(depreciation_ddb(1000.0, 0.0, 1.0).is_err());
-        assert!(depreciation_ddb(1000.0, 5.0, -1.0).is_err());
+        assert!(depreciation_ddb(1000.0, 100.0, 0.0, 1.0).is_err());
+        assert!(depreciation_ddb(1000.0, 100.0, 5.0, -1.0).is_err());
         assert!(compound_rate(1000.0, 2000.0, 0.0).is_err());
     }
 }

@@ -246,6 +246,7 @@ impl Ui {
                 let b = st.base();
                 st.display(b)
             }
+            Some("financial") => self.fin_result_label.text().to_string(),
             _ => {
                 let calc = self.calc.borrow();
                 if !self.result_label.text().is_empty() {
@@ -1642,7 +1643,7 @@ fn switch_mode(ui: &Ui, mode: &str) {
     // When we switch INTO a calculator-family mode, remember it as the
     // return target for the Convert toggle — in memory and persisted so the
     // toggle restores the right mode across a restart.
-    if mode == "calculator" || mode == "programmer" {
+    if mode != "converter" {
         *ui.last_calc_mode.borrow_mut() = mode.to_string();
         settings::set_last_calc_mode(mode);
     }
@@ -1693,6 +1694,7 @@ fn present_preferences(ui: &Ui, window: &adw::ApplicationWindow) {
                     converter_refresh(&ui, &top, &bottom);
                 }
                 "programmer" => ui.render_prog(),
+                "financial" => ui.render_fin(),
                 _ => ui.render(),
             }
         }
@@ -3155,10 +3157,20 @@ fn install_key_controller(ui: &Ui, window: &adw::ApplicationWindow) {
                                 ui.render_fin();
                                 return glib::Propagation::Stop;
                             }
+                            '-' => {
+                                { let mut st = ui.fin.borrow_mut(); st.press_negate(); }
+                                ui.render_fin();
+                                return glib::Propagation::Stop;
+                            }
                             _ => {}
                         }
                     }
                     match keyval {
+                        gdk::Key::minus | gdk::Key::KP_Subtract => {
+                            { let mut st = ui.fin.borrow_mut(); st.press_negate(); }
+                            ui.render_fin();
+                            glib::Propagation::Stop
+                        }
                         gdk::Key::Return | gdk::Key::KP_Enter => {
                             ui.render_fin();
                             glib::Propagation::Stop
