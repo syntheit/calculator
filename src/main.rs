@@ -8,6 +8,7 @@
 
 mod app;
 mod convert;
+mod date_calc;
 mod engine;
 mod financial;
 mod fin_state;
