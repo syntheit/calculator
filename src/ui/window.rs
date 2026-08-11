@@ -1664,6 +1664,11 @@ fn show_history(ui: &Ui) {
         .margin_bottom(12)
         .build();
 
+    let clear_btn = gtk::Button::builder()
+        .icon_name("user-trash-symbolic")
+        .tooltip_text("Clear history")
+        .build();
+
     let hist = ui.history.borrow();
     if hist.is_empty() {
         let empty = adw::StatusPage::builder()
@@ -1676,15 +1681,10 @@ fn show_history(ui: &Ui) {
     } else {
         // Entries are stored oldest-first; show newest-first, grouped by day.
         let entries: Vec<_> = hist.entries().iter().rev().cloned().collect();
-        let entries_len = entries.len();
         let mut current_label: Option<String> = None;
         let mut group: Option<adw::PreferencesGroup> = None;
 
-        for (display_i, entry) in entries.iter().enumerate() {
-            // Display is newest-first (reversed); map back to the storage index
-            // (oldest-first) so History::remove targets the right entry.
-            let storage_idx = entries_len - 1 - display_i;
-
+        for entry in entries.iter() {
             let label = history::day_label(entry.timestamp, now);
             if current_label.as_deref() != Some(label.as_str()) {
                 let g = adw::PreferencesGroup::builder().title(&label).build();
@@ -1693,9 +1693,10 @@ fn show_history(ui: &Ui) {
                 current_label = Some(label);
             }
 
+            // Plain two-line row added directly to the day-group.
             let row = adw::ActionRow::builder().activatable(true).build();
+            row.set_hexpand(true);
 
-            // Two-line row: dim expression above, larger result below.
             let text = gtk::Box::builder()
                 .orientation(gtk::Orientation::Vertical)
                 .spacing(2)
@@ -1722,11 +1723,37 @@ fn show_history(ui: &Ui) {
             text.append(&res);
             row.add_suffix(&text);
 
+            // Trailing flat delete button: delete in place (no rebuild).
+            let del_btn = gtk::Button::builder()
+                .icon_name("user-trash-symbolic")
+                .valign(gtk::Align::Center)
+                .tooltip_text("Delete entry")
+                .css_classes(["flat", "circular"])
+                .build();
+            let entry_btn = entry.clone();
+            let group_btn = group.clone().expect("day-group exists");
+            del_btn.connect_clicked(clone!(
+                #[weak]
+                ui,
+                #[weak]
+                row,
+                #[weak]
+                content,
+                #[weak]
+                clear_btn,
+                #[upgrade_or_default]
+                move |_| {
+                    delete_in_place(&ui, &entry_btn, &row, &group_btn, &content, &clear_btn);
+                }
+            ));
+            row.add_suffix(&del_btn);
+
             // Tap → insert the result into the current expression, pop back.
             let result_value = entry.result.clone();
             row.connect_activated(clone!(
                 #[weak]
                 ui,
+                #[upgrade_or_default]
                 move |_| {
                     ui.calc.borrow_mut().insert_result(&result_value);
                     ui.render();
@@ -1734,49 +1761,27 @@ fn show_history(ui: &Ui) {
                 }
             ));
 
-            // Trailing flat delete button: remove this entry and refresh the page.
-            let del_btn = gtk::Button::builder()
-                .icon_name("user-trash-symbolic")
-                .valign(gtk::Align::Center)
-                .tooltip_text("Delete entry")
-                .css_classes(["flat", "circular"])
-                .build();
-            del_btn.connect_clicked(clone!(
-                #[weak]
-                ui,
-                #[upgrade_or_default]
-                move |_| {
-                    {
-                        let mut h = ui.history.borrow_mut();
-                        h.remove(storage_idx);
-                        h.save();
-                    }
-                    ui.nav.pop();
-                    show_history(&ui);
-                }
-            ));
-            row.add_suffix(&del_btn);
-
-            // Swipe-to-delete: a leftward horizontal-dominant flick removes this
-            // entry the same way the trash button does. Reliable flick-detect —
-            // no follow-finger reveal, no red overlay, no CSS. The velocity gate
-            // (horizontal must dominate, sufficient leftward speed) means a plain
-            // tap won't fire it and a vertical scroll-flick stays with the
-            // ScrolledWindow's kinetic scroll (the gesture never claims the seq).
+            // Flick-to-delete: a leftward, horizontal-dominant swipe deletes the
+            // row. Default (bubble) phase so tap-to-insert and vertical scroll
+            // still win for non-flick gestures.
+            let entry_swipe = entry.clone();
+            let group_swipe = group.clone().expect("day-group exists");
             let swipe = gtk::GestureSwipe::new();
             swipe.connect_swipe(clone!(
                 #[weak]
                 ui,
+                #[weak]
+                row,
+                #[weak]
+                content,
+                #[weak]
+                clear_btn,
                 #[upgrade_or_default]
-                move |_gesture, velocity_x, velocity_y| {
-                    if velocity_x < -300.0 && velocity_x.abs() > velocity_y.abs() {
-                        {
-                            let mut h = ui.history.borrow_mut();
-                            h.remove(storage_idx);
-                            h.save();
-                        }
-                        ui.nav.pop();
-                        show_history(&ui);
+                move |_g, velocity_x, velocity_y| {
+                    // Leftward, horizontal-dominant flick with enough speed → delete.
+                    // NOTE: the velocity threshold (-400.0) is on-device tunable.
+                    if velocity_x < -400.0 && velocity_x.abs() > velocity_y.abs() {
+                        delete_in_place(&ui, &entry_swipe, &row, &group_swipe, &content, &clear_btn);
                     }
                 }
             ));
@@ -1788,6 +1793,9 @@ fn show_history(ui: &Ui) {
         }
     }
     drop(hist);
+    if ui.history.borrow().is_empty() {
+        clear_btn.set_sensitive(false);
+    }
 
     let scroller = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
@@ -1801,10 +1809,6 @@ fn show_history(ui: &Ui) {
         .build();
 
     let header = adw::HeaderBar::new();
-    let clear_btn = gtk::Button::builder()
-        .icon_name("user-trash-symbolic")
-        .tooltip_text("Clear history")
-        .build();
     clear_btn.connect_clicked(clone!(
         #[weak]
         ui,
@@ -1831,6 +1835,72 @@ fn show_history(ui: &Ui) {
         .child(&toolbar)
         .build();
     ui.nav.push(&page);
+}
+
+/// Delete `entry` from history by identity, persist, then remove ONLY this
+/// row widget from its day-group in place — no nav.pop, no rebuild. If the
+/// group is now empty hide it; if all history is gone, show the empty state
+/// and disable the Clear-history button. Deleting by identity (value match,
+/// not index) stays correct regardless of removal order.
+fn delete_in_place(
+    ui: &Ui,
+    entry: &history::HistoryEntry,
+    row: &adw::ActionRow,
+    group: &adw::PreferencesGroup,
+    content: &gtk::Box,
+    clear_btn: &gtk::Button,
+) {
+    // Mutate + persist history with the borrow scoped and dropped BEFORE any
+    // widget mutation.
+    {
+        let mut h = ui.history.borrow_mut();
+        h.remove_entry(entry);
+        h.save();
+    }
+    // Remove only this row widget from its group.
+    group.remove(row);
+    // If the group has no rows left, hide it (drops its day header too).
+    if preferences_group_is_empty(group) {
+        group.set_visible(false);
+    }
+    // If history is now entirely empty, swap in the empty state + disable Clear.
+    if ui.history.borrow().is_empty() {
+        while let Some(c) = content.first_child() {
+            content.remove(&c);
+        }
+        let empty = adw::StatusPage::builder()
+            .icon_name("document-open-recent-symbolic")
+            .title("No history yet")
+            .description("Completed calculations will appear here.")
+            .vexpand(true)
+            .build();
+        content.append(&empty);
+        clear_btn.set_sensitive(false);
+    }
+}
+
+/// Whether an AdwPreferencesGroup has no list rows left (used to hide the
+/// group + its header once its last entry is deleted).
+fn preferences_group_is_empty(group: &adw::PreferencesGroup) -> bool {
+    fn count_rows(w: &gtk::Widget) -> usize {
+        let mut n = 0;
+        if w.is::<gtk::ListBoxRow>() {
+            n += 1;
+        }
+        let mut c = w.first_child();
+        while let Some(ch) = c {
+            n += count_rows(&ch);
+            c = ch.next_sibling();
+        }
+        n
+    }
+    let mut total = 0;
+    let mut cur = group.upcast_ref::<gtk::Widget>().first_child();
+    while let Some(w) = cur {
+        total += count_rows(&w);
+        cur = w.next_sibling();
+    }
+    total == 0
 }
 
 /// Localize a canonical decimal number string (e.g. "1234.5") for display:

@@ -104,9 +104,23 @@ impl History {
 
     /// Remove the entry at `index` (no-op if out of bounds). The caller is
     /// responsible for calling [`save`](Self::save) afterward to persist.
+    #[allow(dead_code)]
     pub fn remove(&mut self, index: usize) {
         if index < self.entries.len() {
             self.entries.remove(index);
+        }
+    }
+
+    /// Remove the first entry equal to `entry` (by value), returning whether
+    /// one was removed. Deleting by identity (not positional index) stays
+    /// correct as rows are removed one at a time in the UI. The caller is
+    /// responsible for calling [`save`](Self::save) afterward to persist.
+    pub fn remove_entry(&mut self, entry: &HistoryEntry) -> bool {
+        if let Some(pos) = self.entries.iter().position(|e| e == entry) {
+            self.entries.remove(pos);
+            true
+        } else {
+            false
         }
     }
 
@@ -245,6 +259,25 @@ mod tests {
         // Out-of-bounds is a no-op (no panic).
         h.remove(99);
         assert_eq!(h.entries().len(), 2);
+    }
+
+    #[test]
+    fn remove_entry_by_identity() {
+        let mut h = History::default();
+        let a = HistoryEntry::new("a", "1");
+        let b = HistoryEntry::new("b", "2");
+        let c = HistoryEntry::new("c", "3");
+        h.push(a.clone());
+        h.push(b.clone());
+        h.push(c.clone());
+        // Remove B then A — order-independent because it's by value.
+        assert!(h.remove_entry(&b));
+        assert!(h.remove_entry(&a));
+        assert_eq!(h.entries().len(), 1);
+        assert_eq!(h.entries()[0].expression, "c");
+        // Removing something absent is a no-op returning false.
+        assert!(!h.remove_entry(&b));
+        assert_eq!(h.entries().len(), 1);
     }
 
     #[test]
