@@ -1734,76 +1734,31 @@ fn show_history(ui: &Ui) {
                 }
             ));
 
-            // Swipe-to-delete: wrap the row in an Overlay whose background is a
-            // red trash strip. The foreground is an opaque single-row ListBox
-            // (ActionRow alone is transparent) that we fade/nudge left as the
-            // drag progresses, and delete past a threshold.
-            let fg_list = gtk::ListBox::new();
-            fg_list.add_css_class("boxed-list");
-            fg_list.set_selection_mode(gtk::SelectionMode::None);
-            fg_list.append(&row);
-
-            let del_strip = gtk::Box::builder()
-                .orientation(gtk::Orientation::Horizontal)
-                .hexpand(true)
-                .vexpand(true)
+            // Trailing flat delete button: remove this entry and refresh the page.
+            let del_btn = gtk::Button::builder()
+                .icon_name("user-trash-symbolic")
+                .valign(gtk::Align::Center)
+                .tooltip_text("Delete entry")
+                .css_classes(["flat", "circular"])
                 .build();
-            del_strip.add_css_class("calc-hist-delete");
-            let trash = gtk::Image::from_icon_name("user-trash-symbolic");
-            trash.set_halign(gtk::Align::End);
-            trash.set_valign(gtk::Align::Center);
-            trash.set_hexpand(true);
-            trash.set_margin_end(24);
-            del_strip.append(&trash);
-
-            let overlay = gtk::Overlay::new();
-            overlay.set_child(Some(&del_strip));
-            overlay.add_overlay(&fg_list);
-
-            // Leftward drag on the foreground: fade + nudge for feedback, and
-            // commit a delete past the distance threshold. Default (Bubble)
-            // phase + a dead-zone means a plain tap never Claims, so the
-            // ActionRow's own activation (tap-to-insert) still fires.
-            let drag = gtk::GestureDrag::new();
-            drag.connect_drag_update(clone!(
-                #[weak]
-                fg_list,
-                #[upgrade_or_default]
-                move |g, off_x, off_y| {
-                    if off_x < -12.0 && off_x.abs() > off_y.abs() {
-                        g.set_state(gtk::EventSequenceState::Claimed);
-                        fg_list.set_opacity((1.0 - (off_x.abs() / 200.0)).clamp(0.3, 1.0));
-                        fg_list.set_margin_end((off_x.abs() as i32).min(120));
-                    }
-                }
-            ));
-            drag.connect_drag_end(clone!(
+            del_btn.connect_clicked(clone!(
                 #[weak]
                 ui,
-                #[weak]
-                fg_list,
                 #[upgrade_or_default]
-                move |_g, off_x, off_y| {
-                    if off_x < -100.0 && off_x.abs() > off_y.abs() {
-                        // Commit delete: mutate + persist, then re-render the page.
-                        {
-                            let mut h = ui.history.borrow_mut();
-                            h.remove(storage_idx);
-                            h.save();
-                        }
-                        ui.nav.pop();
-                        show_history(&ui);
-                    } else {
-                        // Spring back to rest.
-                        fg_list.set_opacity(1.0);
-                        fg_list.set_margin_end(0);
+                move |_| {
+                    {
+                        let mut h = ui.history.borrow_mut();
+                        h.remove(storage_idx);
+                        h.save();
                     }
+                    ui.nav.pop();
+                    show_history(&ui);
                 }
             ));
-            fg_list.add_controller(drag);
+            row.add_suffix(&del_btn);
 
             if let Some(g) = &group {
-                g.add(&overlay);
+                g.add(&row);
             }
         }
     }

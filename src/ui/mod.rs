@@ -155,11 +155,6 @@ pub const APP_CSS: &str = "
     font-size: 1.5em;
     color: @window_fg_color;
 }
-.calc-hist-delete {
-    background-color: @error_bg_color;
-    color: @error_fg_color;
-    border-radius: 12px;
-}
 
 /* ─── Landscape overrides ─────────────────────────────────────────────── */
 
