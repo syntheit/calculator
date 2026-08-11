@@ -79,17 +79,22 @@ pub fn format_with(value: f64, group: char, decimal: char) -> String {
         return "0".to_string();
     }
 
+    // Round once: reused for the fixed-vs-scientific threshold AND for the
+    // fixed formatter below, so `round_sig` (a log10 + powi + round) runs a
+    // single time per fixed-path result instead of twice.
+    //
     // Decide fixed-vs-scientific against the ROUNDED magnitude, not the raw
     // value: e.g. 999999999999999.0 is < 1e15 but rounds up to 1e15 at 12 sig
     // figs, and must go to E-notation rather than print 16 grouped digits.
-    let abs = round_sig(value).0.abs();
+    let (rounded, non_terminating) = round_sig(value);
+    let abs = rounded.abs();
     // Thresholds: very large or very small magnitudes go to E-notation, where
     // fixed formatting would otherwise emit a wall of zeros.
     if !(1e-6..1e15).contains(&abs) {
         return format_scientific(value, decimal);
     }
 
-    format_fixed(value, group, decimal)
+    format_fixed(rounded, non_terminating, group, decimal)
 }
 
 /// Round `value` to [`SIG_FIGS`] significant figures. Returns the rounded value
@@ -111,9 +116,10 @@ fn round_sig(value: f64) -> (f64, bool) {
 }
 
 /// Fixed-point formatting with grouping, trailing-zero trim and ellipsis.
-fn format_fixed(value: f64, group: char, decimal: char) -> String {
-    let (rounded, non_terminating) = round_sig(value);
-
+/// `rounded` is the value already put through [`round_sig`] by the caller, and
+/// `non_terminating` is that same rounding's "dropped-detail" flag — so the
+/// rounding work is not repeated here.
+fn format_fixed(rounded: f64, non_terminating: bool, group: char, decimal: char) -> String {
     let negative = rounded < 0.0;
     let abs = rounded.abs();
 

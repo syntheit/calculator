@@ -91,6 +91,21 @@ pub struct ProgState {
     error: Option<String>,
 }
 
+/// One render pass's worth of programmer-mode display data, computed from a
+/// single evaluation of the buffer. See [`ProgState::render_snapshot`].
+pub struct ProgSnapshot {
+    /// A live *arithmetic* error (DivByZero/Overflow) to surface mid-type, or
+    /// `None` for an empty/partial buffer — same semantics as
+    /// [`ProgState::error_preview`].
+    pub error_preview: Option<String>,
+    /// The value rendered in each base (a `0` rendering when there is no live
+    /// value), in the same form [`ProgState::display`] produces.
+    pub hex: String,
+    pub dec: String,
+    pub oct: String,
+    pub bin: String,
+}
+
 impl ProgState {
     /// Creates a fresh state with an empty buffer, the given display settings,
     /// and no error.
@@ -274,6 +289,35 @@ impl ProgState {
             Ok(_) => None,
             Err(programmer::ProgError::Syntax) => None,
             Err(e) => Some(e.to_string()),
+        }
+    }
+
+    /// Snapshot for a single render pass: evaluates the buffer ONCE and derives
+    /// the live-error preview and the four base renderings from that one result,
+    /// instead of re-lexing the buffer per base. Behavior matches calling
+    /// `error_preview()` then `display(Base)` four times (a live arithmetic error
+    /// yields a `0` rendering in every base, exactly as `display` does for a
+    /// `None` value), but does the parse work only once.
+    pub fn render_snapshot(&self) -> ProgSnapshot {
+        // Evaluate once (mirrors `value()` / `error_preview()` short-circuits).
+        let (value, error_preview) = if self.buffer.trim().is_empty() {
+            (None, None)
+        } else {
+            match programmer::evaluate(&self.buffer, self.base, self.width, self.signed) {
+                Ok(v) => (Some(v), None),
+                Err(programmer::ProgError::Syntax) => (None, None),
+                Err(e) => (None, Some(e.to_string())),
+            }
+        };
+        // Render each base from the single value (or 0 when there is none), which
+        // is exactly what `display(base)` does per base.
+        let v = value.unwrap_or(0);
+        ProgSnapshot {
+            error_preview,
+            hex: programmer::format(v, Base::Hex, self.width, self.signed),
+            dec: programmer::format(v, Base::Dec, self.width, self.signed),
+            oct: programmer::format(v, Base::Oct, self.width, self.signed),
+            bin: programmer::format(v, Base::Bin, self.width, self.signed),
         }
     }
 

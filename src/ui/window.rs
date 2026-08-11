@@ -7,7 +7,7 @@
 //! place. The display is drawn with non-editable [`gtk::Label`]s so the GNOME
 //! on-screen keyboard never appears.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -29,6 +29,10 @@ use crate::state::{CalcState, Calculator, Func, Op};
 pub struct Ui {
     calc: Rc<RefCell<Calculator>>,
     history: Rc<RefCell<History>>,
+    /// Cached number-format locale. Read on every render; refreshed once at
+    /// build_ui and whenever the number-format preference changes, so a
+    /// gio::Settings is not reconstructed per keystroke.
+    locale: Rc<Cell<NumLocale>>,
     /// The pretty expression line.
     expr_label: gtk::Label,
     /// The live-result / (Result state) primary answer line.
@@ -137,9 +141,9 @@ pub struct Ui {
 }
 
 impl Ui {
-    /// The user's chosen number-format locale.
+    /// The user's chosen number-format locale (cached).
     fn locale(&self) -> NumLocale {
-        settings::number_format()
+        self.locale.get()
     }
 
     /// Fire a subtle keypress vibration when the haptic-feedback setting is
@@ -320,20 +324,23 @@ impl Ui {
     /// Redraw the programmer-mode page from ProgState. Borrow-safe: no RefCell
     /// borrow is held across any widget setter.
     fn render_prog(&self) {
-        // Read everything needed into locals, then drop the borrow.
+        // Read everything needed into locals, then drop the borrow. A single
+        // `render_snapshot()` evaluates the buffer ONCE and yields the four base
+        // renderings + live-error preview, instead of re-lexing per base.
         let (latched_err, err_msg, live_err, active_base, hex, dec, oct, bin, expr) = {
             let st = self.prog.borrow();
             let latched = st.error().map(|s| s.to_string());
-            let live = st.error_preview();
+            let snap = st.render_snapshot();
+            let live = snap.error_preview;
             (
                 latched.is_some(),
-                latched.clone().or_else(|| live.clone()).unwrap_or_default(),
+                latched.or_else(|| live.clone()).unwrap_or_default(),
                 live.is_some(),
                 st.base(),
-                st.display(Base::Hex),
-                st.display(Base::Dec),
-                st.display(Base::Oct),
-                st.display(Base::Bin),
+                snap.hex,
+                snap.dec,
+                snap.oct,
+                snap.bin,
                 st.expression(),
             )
         };
@@ -1078,6 +1085,7 @@ pub fn build_ui(app: &adw::Application) {
     let ui = Ui {
         calc: calc.clone(),
         history: history.clone(),
+        locale: Rc::new(Cell::new(settings::number_format())),
         expr_label: expr_label.clone(),
         result_label: result_label.clone(),
         indicator_label: indicator_label.clone(),
@@ -2051,6 +2059,7 @@ fn present_preferences(ui: &Ui, window: &adw::ApplicationWindow) {
                 NumLocale::EnUs
             };
             settings::set_number_format(locale);
+            ui.locale.set(locale);
             match settings::active_mode().as_str() {
                 "converter" => {
                     let top = ui.conv_top_label.clone();
