@@ -302,6 +302,13 @@ impl Ui {
                 }
             }
             Some("financial") => self.fin_result_label.text().to_string(),
+            Some("date") => {
+                if self.date_stack.visible_child_name().as_deref() == Some("addsub") {
+                    self.date_result_label.text().to_string()
+                } else {
+                    self.date_diff_days_label.text().to_string()
+                }
+            }
             _ => {
                 let calc = self.calc.borrow();
                 if !self.result_label.text().is_empty() {
@@ -612,14 +619,15 @@ impl Ui {
         let n = crate::date_calc::days_between(from, to);
         let mag = n.abs();
         let sign = if n < 0 { "\u{2212}" } else { "" };
-        let grouped = group_from_right(&mag.to_string(), 3, ',');
+        let group = self.locale().group();
+        let grouped = group_from_right(&mag.to_string(), 3, group);
         let mut days_text = format!("{sign}{grouped} days");
         if mag >= 7 {
             let weeks = mag / 7;
             let rem = mag % 7;
             days_text.push_str(&format!(
                 " ({} weeks {} days)",
-                group_from_right(&weeks.to_string(), 3, ','),
+                group_from_right(&weeks.to_string(), 3, group),
                 rem
             ));
         }
@@ -2068,6 +2076,7 @@ fn present_preferences(ui: &Ui, window: &adw::ApplicationWindow) {
                 }
                 "programmer" => ui.render_prog(),
                 "financial" => ui.render_fin(),
+                "date" => ui.date_render(),
                 _ => ui.render(),
             }
         }
@@ -2145,7 +2154,7 @@ fn paste_from_clipboard(ui: &Ui) {
                 if let Ok(Some(text)) = res {
                     {
                         let mut calc = ui.calc.borrow_mut();
-                        calc.paste(text.as_str());
+                        calc.paste(text.as_str(), ui.locale());
                     } // borrow dropped before render
                     ui.render();
                 }

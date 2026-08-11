@@ -205,6 +205,13 @@ fn eval_call2(f: Func2Name, a: f64, b: f64, _angle: AngleUnit) -> Result<f64, Ev
             let mut acc = 1.0f64;
             for i in 0..r_count {
                 acc *= n - i as f64;
+                // Bail the instant the product overflows to +/-inf (or NaN).
+                // acc only grows in magnitude here, so once it is non-finite
+                // it stays so; the early return bounds the loop to a few dozen
+                // iterations for huge inputs instead of up to `r` iterations.
+                if !acc.is_finite() {
+                    return Err(EvalError::Overflow);
+                }
             }
             let result = acc.round();
             if result.is_infinite() || result.is_nan() {
@@ -226,6 +233,13 @@ fn eval_call2(f: Func2Name, a: f64, b: f64, _angle: AngleUnit) -> Result<f64, Ev
             let mut acc = 1.0f64;
             for i in 1..=k {
                 acc = acc * (n - k as f64 + i as f64) / i as f64;
+                // nCr grows extremely fast; for huge inputs acc overflows to
+                // +/-inf within a few dozen iterations. Bail immediately so the
+                // loop is bounded rather than running up to k = min(r, n-r)
+                // iterations (which is ~1e8 for nCr(1e9, 1e8)).
+                if !acc.is_finite() {
+                    return Err(EvalError::Overflow);
+                }
             }
             let result = acc.round();
             if result.is_infinite() || result.is_nan() {
@@ -560,6 +574,23 @@ mod tests {
         assert!(close(ok("nCr(52,5)"), 2598960.0));
         assert!(close(ok("nCr(10,3)"), 120.0));
         assert_eq!(ev("nCr(2,5)", AngleUnit::Rad), Err(EvalError::Domain));
+    }
+
+    #[test]
+    fn huge_npr_ncr_overflow_fast() {
+        // These must NOT hang: the in-loop finite guard bails within a few
+        // dozen iterations once the accumulator overflows to infinity, instead
+        // of iterating up to r (~1e8). nPr(1e9, 1e8) and nCr(1e9, 1e8) both
+        // overflow f64 (max ~1.8e308), so both return Overflow essentially
+        // instantly. If the guard is wrong this test hangs, which is the signal.
+        assert_eq!(
+            ev("nPr(1000000000,100000000)", AngleUnit::Rad),
+            Err(EvalError::Overflow)
+        );
+        assert_eq!(
+            ev("nCr(1000000000,100000000)", AngleUnit::Rad),
+            Err(EvalError::Overflow)
+        );
     }
 
     #[test]

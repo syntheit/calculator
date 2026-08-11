@@ -118,11 +118,15 @@ pub const APP_CSS: &str = "
 }
 
 /* ─── Scientific pad — pill/stadium keys (multi-char labels) ───────────── */
+/* min-height reduced to 38px so the expanded 6-row scientific pad fits a
+   432×916 portrait viewport above the 5-row basic pad without clipping the
+   bottom (0 . ⌫ =) row (degrades acceptably on 380×780). GTK adds internal
+   padding, so the visual tap target stays comfortably >~44px. */
 
 .calc-sci {
     font-size: 1.1em;
     min-width: 56px;
-    min-height: 46px;
+    min-height: 38px;
     border-radius: 9999px;   /* stadium */
     padding: 0 6px;
     transition: background-color 100ms ease, box-shadow 100ms ease, filter 100ms ease;

@@ -276,15 +276,23 @@ pub fn depreciation_ddb(cost: f64, salvage: f64, life: f64, period: f64) -> Resu
         return Err(FinError::Invalid);
     }
     let rate = 2.0 / life;
-    let count = period as i64;
-    let mut bv = cost;
-    let mut z = 0.0;
-    for _ in 0..count {
-        // Depreciate `rate` of the remaining book value, but never take the
-        // book value below salvage.
-        z = (rate * bv).min((bv - salvage).max(0.0));
-        bv -= z;
+    // Closed form (O(1)): the unclamped book value at the start of period p
+    // (1-based) is `cost * (1 - rate)^(p-1)`. DDB only reduces book value and
+    // the salvage clamp only reduces depreciation, so this unclamped value is
+    // exact until the clamp first bites. Once it has fallen to/below salvage,
+    // the true book value was pinned at salvage in an earlier period and this
+    // period's depreciation is 0. Otherwise depreciation is the clamped step
+    // `min(book_start * rate, book_start - salvage)` (never take book below
+    // salvage; `book_start - salvage` is >= 0 here since book_start > salvage).
+    let book_start = cost * (1.0 - rate).powf(period - 1.0);
+    if !book_start.is_finite() {
+        return finite(book_start);
     }
+    let z = if book_start <= salvage {
+        0.0
+    } else {
+        (book_start * rate).min((book_start - salvage).max(0.0))
+    };
     finite(z)
 }
 
@@ -423,6 +431,15 @@ mod tests {
     fn depreciation_ddb_period_zero() {
         // Blank period (UI maps blank -> 0) is now invalid.
         assert!(depreciation_ddb(1000.0, 100.0, 5.0, 0.0).is_err());
+    }
+
+    #[test]
+    fn ddb_huge_period_is_fast_closed_form() {
+        // With the old per-period loop this would spin ~1e9 iterations and hang.
+        // The closed form returns immediately; the huge period drives book value
+        // to (well below) salvage, so depreciation is clamped to 0.
+        let d = depreciation_ddb(1000.0, 100.0, 1e9, 1e9).unwrap();
+        assert!(d.abs() < 1e-6, "expected ~0 depreciation, got {d}");
     }
 
     #[test]
