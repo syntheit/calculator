@@ -12,6 +12,7 @@ mod date_calc;
 mod engine;
 mod financial;
 mod fin_state;
+mod haptics;
 mod history;
 mod programmer;
 mod prog_state;

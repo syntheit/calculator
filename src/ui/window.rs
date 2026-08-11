@@ -132,12 +132,23 @@ pub struct Ui {
     /// The date-function picker and the stack swapping the two sub-pages.
     date_func_combo: adw::ComboRow,
     date_stack: gtk::Stack,
+    /// Optional keypress-haptics handle (a silent no-op when no vibrator is present).
+    haptics: std::rc::Rc<crate::haptics::Haptics>,
 }
 
 impl Ui {
     /// The user's chosen number-format locale.
     fn locale(&self) -> NumLocale {
         settings::number_format()
+    }
+
+    /// Fire a subtle keypress vibration when the haptic-feedback setting is
+    /// on. Reads the setting live so toggling Preferences takes effect without
+    /// a restart; `buzz` is a cheap no-op when no vibrator is present.
+    fn buzz(&self) {
+        if settings::haptic_feedback() {
+            self.haptics.buzz();
+        }
     }
 
     /// Redraw the display from the calculator state. Called after every input.
@@ -1063,6 +1074,7 @@ pub fn build_ui(app: &adw::Application) {
     date_stack.set_hhomogeneous(false); // CRITICAL anti-regression
     date_stack.set_vhomogeneous(false); // CRITICAL anti-regression
 
+    let haptics = Rc::new(crate::haptics::Haptics::init());
     let ui = Ui {
         calc: calc.clone(),
         history: history.clone(),
@@ -1124,6 +1136,7 @@ pub fn build_ui(app: &adw::Application) {
         date_result_label: date_result_label.clone(),
         date_func_combo: date_func_combo.clone(),
         date_stack: date_stack.clone(),
+        haptics,
     };
 
     // Wire both stateful button sets (each set wired exactly once — no widget
@@ -1495,6 +1508,7 @@ fn key_button(label: &str, class: &str, ui: &Ui, on_press: impl Fn(&mut Calculat
         #[weak]
         ui,
         move |_| {
+            ui.buzz();
             on_press(&mut ui.calc.borrow_mut());
             ui.render();
         }
@@ -1519,6 +1533,7 @@ fn wire_sci(btn: &gtk::Button, ui: &Ui, on_press: impl Fn(&mut Calculator) + 'st
         #[weak]
         ui,
         move |_| {
+            ui.buzz();
             on_press(&mut ui.calc.borrow_mut());
             ui.render();
         }
@@ -1578,6 +1593,7 @@ fn wire_sci_buttons(ui: &Ui, s: &SciButtons) {
         #[weak]
         ui,
         move |_| {
+            ui.buzz();
             let next = match ui.calc.borrow().angle() {
                 AngleUnit::Deg => AngleUnit::Rad,
                 AngleUnit::Rad => AngleUnit::Deg,
@@ -1595,6 +1611,7 @@ fn wire_sci_buttons(ui: &Ui, s: &SciButtons) {
         #[weak]
         ui,
         move |_| {
+            ui.buzz();
             ui.calc.borrow_mut().toggle_inv();
             ui.sync_sci();
             ui.render();
@@ -1622,6 +1639,7 @@ fn wire_sci_buttons(ui: &Ui, s: &SciButtons) {
         #[weak]
         ui,
         move |_| {
+            ui.buzz();
             {
                 let mut c = ui.calc.borrow_mut();
                 if c.inv() {
@@ -1685,6 +1703,7 @@ fn build_basic_pad(ui: &Ui, _app: &adw::Application, _window: &adw::ApplicationW
         #[weak]
         ui,
         move |_| {
+            ui.buzz();
             ui.calc.borrow_mut().backspace();
             ui.render();
         }
@@ -1702,7 +1721,10 @@ fn build_basic_pad(ui: &Ui, _app: &adw::Application, _window: &adw::ApplicationW
     equals.connect_clicked(clone!(
         #[weak]
         ui,
-        move |_| do_equals(&ui)
+        move |_| {
+            ui.buzz();
+            do_equals(&ui);
+        }
     ));
     grid.attach(&equals, 3, 4, 1, 1);
 
@@ -2045,6 +2067,20 @@ fn present_preferences(ui: &Ui, window: &adw::ApplicationWindow) {
     group.add(&combo);
     page.add(&group);
 
+    let input_group = adw::PreferencesGroup::builder().title("Input").build();
+    let haptic_row = adw::SwitchRow::builder()
+        .title("Haptic feedback")
+        .subtitle("Vibrate on keypad presses (requires a supported device)")
+        .active(settings::haptic_feedback())
+        .build();
+    // buzz() reads the setting live, so persisting is all we need here — the
+    // toggle takes effect immediately with no cached state to update.
+    haptic_row.connect_active_notify(move |row| {
+        settings::set_haptic_feedback(row.is_active());
+    });
+    input_group.add(&haptic_row);
+    page.add(&input_group);
+
     let dialog = adw::PreferencesDialog::new();
     dialog.add(&page);
     dialog.present(Some(window));
@@ -2079,6 +2115,36 @@ fn attach_result_menu(ui: &Ui, result_label: &gtk::Label) {
 }
 
 /// Pop a small memory/copy menu anchored at (x, y) over `anchor`.
+/// Read the clipboard text asynchronously and feed it through
+/// [`Calculator::paste`] (which sanitizes and inserts a number, no-op on
+/// garbage), then re-render. The calculator borrow is taken FRESH inside the
+/// async completion callback and dropped before `render` — no `RefCell` borrow
+/// ever crosses the async boundary. Uses `#[weak] ui` so a window dropped mid-read
+/// is safe.
+fn paste_from_clipboard(ui: &Ui) {
+    let Some(display) = gdk::Display::default() else {
+        return;
+    };
+    let clipboard = display.clipboard();
+    clipboard.read_text_async(
+        gio::Cancellable::NONE,
+        clone!(
+            #[weak]
+            ui,
+            #[upgrade_or_default]
+            move |res| {
+                if let Ok(Some(text)) = res {
+                    {
+                        let mut calc = ui.calc.borrow_mut();
+                        calc.paste(text.as_str());
+                    } // borrow dropped before render
+                    ui.render();
+                }
+            }
+        ),
+    );
+}
+
 fn show_result_popover(ui: &Ui, anchor: &gtk::Widget, x: f64, y: f64) {
     let content = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -2120,6 +2186,19 @@ fn show_result_popover(ui: &Ui, anchor: &gtk::Widget, x: f64, y: f64) {
             "Copy",
             Box::new(move || {
                 ui2.copy_result();
+                pop.popdown();
+            }),
+        ));
+    }
+
+    // Paste — calculator mode only (the paste state machine is calculator-only).
+    if ui.content_stack.visible_child_name().as_deref() == Some("calculator") {
+        let ui2 = ui.clone();
+        let pop = popover.clone();
+        content.append(&add_row(
+            "Paste",
+            Box::new(move || {
+                paste_from_clipboard(&ui2);
                 pop.popdown();
             }),
         ));
@@ -2502,6 +2581,7 @@ fn conv_key(
         bottom,
         #[upgrade_or_default]
         move |_| {
+            ui.buzz();
             mutate(&mut ui.converter.borrow_mut());
             converter_refresh(&ui, &top, &bottom);
         }
@@ -2708,6 +2788,7 @@ fn build_converter_page(ui: &Ui) -> gtk::Widget {
         bottom_label,
         #[upgrade_or_default]
         move |_| {
+            ui.buzz();
             ui.converter.borrow_mut().input.pop();
             converter_refresh(&ui, &top_label, &bottom_label);
         }
@@ -2840,6 +2921,7 @@ fn prog_op_btn(ui: &Ui, label: &str, sym: &str, class: &str) -> gtk::Button {
         ui,
         #[upgrade_or_default]
         move |_| {
+            ui.buzz();
             {
                 let mut st = ui.prog.borrow_mut();
                 st.press_op(&sym);
@@ -2915,6 +2997,7 @@ fn build_financial_page(
             ui,
             #[upgrade_or_default]
             move |_| {
+                ui.buzz();
                 {
                     let mut st = ui.fin.borrow_mut();
                     mutate(&mut st);
@@ -2939,6 +3022,7 @@ fn build_financial_page(
             ui,
             #[upgrade_or_default]
             move |_| {
+                ui.buzz();
                 {
                     let mut st = ui.fin.borrow_mut();
                     st.press_digit(d);
@@ -2962,6 +3046,7 @@ fn build_financial_page(
         ui,
         #[upgrade_or_default]
         move |_| {
+            ui.buzz();
             {
                 let mut st = ui.fin.borrow_mut();
                 st.backspace();
@@ -2983,6 +3068,7 @@ fn build_financial_page(
         ui,
         #[upgrade_or_default]
         move |_| {
+            ui.buzz();
             ui.render_fin();
         }
     ));
@@ -3067,6 +3153,7 @@ fn date_key(
         ui,
         #[upgrade_or_default]
         move |_| {
+            ui.buzz();
             {
                 let mut st = ui.date.borrow_mut();
                 mutate(&mut st);
@@ -3091,6 +3178,7 @@ fn date_digit(ui: &Ui, d: char) -> gtk::Button {
         ui,
         #[upgrade_or_default]
         move |_| {
+            ui.buzz();
             {
                 let mut st = ui.date.borrow_mut();
                 if st.count.len() < 9 {
@@ -3472,6 +3560,7 @@ fn build_programmer_page(
             ui,
             #[upgrade_or_default]
             move |_| {
+                ui.buzz();
                 {
                     let mut st = ui.prog.borrow_mut();
                     st.press_digit(c);
@@ -3489,6 +3578,7 @@ fn build_programmer_page(
             ui,
             #[upgrade_or_default]
             move |_| {
+                ui.buzz();
                 {
                     let mut st = ui.prog.borrow_mut();
                     st.press_digit(c);
@@ -3511,6 +3601,7 @@ fn build_programmer_page(
         ui,
         #[upgrade_or_default]
         move |_| {
+            ui.buzz();
             {
                 let mut st = ui.prog.borrow_mut();
                 st.backspace();
@@ -3530,6 +3621,7 @@ fn build_programmer_page(
         ui,
         #[upgrade_or_default]
         move |_| {
+            ui.buzz();
             {
                 let mut st = ui.prog.borrow_mut();
                 st.clear();
@@ -3549,6 +3641,7 @@ fn build_programmer_page(
         ui,
         #[upgrade_or_default]
         move |_| {
+            ui.buzz();
             {
                 let mut st = ui.prog.borrow_mut();
                 st.equals();
@@ -3609,6 +3702,7 @@ fn build_programmer_page(
         ui,
         #[upgrade_or_default]
         move |_| {
+            ui.buzz();
             {
                 let mut st = ui.prog.borrow_mut();
                 st.press_digit('0');
@@ -3675,7 +3769,20 @@ fn install_key_controller(ui: &Ui, window: &adw::ApplicationWindow) {
         // NOTE: kept #[strong] — returns glib::Propagation (no default) and is tied to the window lifetime.
         #[strong]
         ui,
-        move |_, keyval, _keycode, _modifier| {
+        move |_, keyval, _keycode, modifier| {
+            // Ctrl+V pastes a number into the calculator (calculator mode only).
+            if (keyval == gdk::Key::v || keyval == gdk::Key::V)
+                && modifier.contains(gdk::ModifierType::CONTROL_MASK)
+            {
+                if ui.nav.visible_page().and_then(|p| p.tag()).as_deref() == Some("calculator")
+                    && ui.content_stack.visible_child_name().as_deref() == Some("calculator")
+                {
+                    paste_from_clipboard(&ui);
+                    return glib::Propagation::Stop;
+                }
+                return glib::Propagation::Proceed;
+            }
+
             // Only act on the calculator page; let the history page handle its
             // own navigation (Escape = back, etc.).
             if ui.nav.visible_page().and_then(|p| p.tag()).as_deref() != Some("calculator") {

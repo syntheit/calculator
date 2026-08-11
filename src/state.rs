@@ -567,6 +567,55 @@ impl Calculator {
         }
     }
 
+    /// Insert clipboard text as a numeric literal, sanitizing common
+    /// human/locale formatting so a pasted number "just works". Wired to the
+    /// paste action; a companion to [`insert_result`](Self::insert_result),
+    /// which handles the narrower case of a formatted engine result.
+    ///
+    /// **Scope is NUMBER-only (v1): expressions are NOT parsed.** A pasted
+    /// string that contains any operator, letter, or other non-numeric glyph
+    /// (e.g. `"2+3"`, `"abc"`, `"3 apples"`) is rejected *wholesale* — we do
+    /// not salvage a leading number. Any invalid or empty input is a silent
+    /// no-op that leaves the buffer completely untouched (we only begin a fresh
+    /// buffer once a finite number has been parsed, so pasting garbage never
+    /// wipes a Result/Error state).
+    ///
+    /// Sanitization (see [`sanitize_pasted_number`]):
+    /// - All Unicode whitespace is stripped.
+    /// - The Unicode minus `−` (U+2212) is mapped to ASCII `-`.
+    /// - Grouping vs. decimal separators are resolved heuristically. If the
+    ///   string contains BOTH `,` and `.`, the LAST-occurring of the two is the
+    ///   decimal separator and the other is grouping (so `"1,234.5"` en-US and
+    ///   `"1.234,5"` es both read as 1234.5). If it contains ONLY commas, a
+    ///   single comma followed by exactly 1 or 2 trailing digits is a decimal
+    ///   (`"12,5"` → 12.5), while a single comma followed by exactly 3 digits
+    ///   (`"1,234"`) or multiple commas are grouping and stripped. A string
+    ///   with only `.` (or neither) is treated as a plain ASCII decimal.
+    /// - The result must reduce to `-?[0-9]*\.?[0-9]*` with at least one digit
+    ///   (`-` only leading, at most one `.`), then parse to a finite `f64`.
+    ///
+    /// The parsed value is inserted exactly like [`insert_result`](Self::insert_result):
+    /// a negative is stored as a leading unary-minus [`Chunk::Sym`] plus its
+    /// magnitude, a fresh buffer is begun after a `=`/error, and a value glued
+    /// onto an existing value relies on the engine's implicit multiplication.
+    pub fn paste(&mut self, s: &str) {
+        // Only mutate once we hold a valid finite number, so invalid input
+        // never disturbs the buffer (or a Result/Error state).
+        let Some(v) = sanitize_pasted_number(s) else {
+            return;
+        };
+        self.begin_fresh_if_needed();
+        if self.last_ends_value() {
+            self.buf.push(Chunk::Sym("*"));
+        }
+        if v.is_sign_negative() && v != 0.0 {
+            self.buf.push(Chunk::Sym("-"));
+            self.buf.push(Chunk::Number(format_seed(v.abs())));
+        } else {
+            self.buf.push(Chunk::Number(format_seed(v)));
+        }
+    }
+
     // ---- control -----------------------------------------------------------
 
     /// All-clear: empty the buffer and return to a clean [`CalcState::Input`].
@@ -862,6 +911,84 @@ fn format_seed(v: f64) -> String {
         // carries no trailing-zero cruft to trim.
         format!("{v}")
     }
+}
+
+/// Sanitize an arbitrary pasted string into a finite `f64`, or `None` if it is
+/// not a well-formed number. NUMBER-only: any operator/letter/other glyph left
+/// after separator resolution rejects the whole string (see
+/// [`Calculator::paste`] for the rationale and the separator heuristic).
+fn sanitize_pasted_number(s: &str) -> Option<f64> {
+    // 1. Strip all whitespace; 2. map Unicode minus to ASCII '-'.
+    let cleaned: String = s
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .map(|c| if c == '\u{2212}' { '-' } else { c })
+        .collect();
+    // 3. Empty after stripping -> not a number.
+    if cleaned.is_empty() {
+        return None;
+    }
+
+    // 4. Resolve grouping vs. decimal separators into a plain ASCII decimal.
+    let has_comma = cleaned.contains(',');
+    let has_dot = cleaned.contains('.');
+    let resolved: String = if has_comma && has_dot {
+        // The last-occurring separator is the decimal; the other is grouping.
+        let last_comma = cleaned.rfind(',').unwrap();
+        let last_dot = cleaned.rfind('.').unwrap();
+        if last_comma > last_dot {
+            // ',' is decimal, '.' is grouping (e.g. es "1.234,5").
+            let stripped: String = cleaned.chars().filter(|&c| c != '.').collect();
+            stripped.replace(',', ".")
+        } else {
+            // '.' is decimal, ',' is grouping (e.g. en-US "1,234.5").
+            cleaned.chars().filter(|&c| c != ',').collect()
+        }
+    } else if has_comma {
+        // Only commas. A lone comma with 1-2 trailing digits is a decimal;
+        // anything else (multiple commas, or a lone comma + exactly 3 digits)
+        // is grouping and stripped.
+        let comma_count = cleaned.matches(',').count();
+        let single_decimal = comma_count == 1 && {
+            let idx = cleaned.find(',').unwrap();
+            let after = &cleaned[idx + 1..];
+            let all_digits = !after.is_empty() && after.chars().all(|c| c.is_ascii_digit());
+            all_digits && (after.len() == 1 || after.len() == 2)
+        };
+        if single_decimal {
+            cleaned.replace(',', ".")
+        } else {
+            cleaned.chars().filter(|&c| c != ',').collect()
+        }
+    } else {
+        // Only '.' or neither: already a plain ASCII decimal.
+        cleaned
+    };
+
+    // 5. At most one '.' may remain.
+    if resolved.matches('.').count() > 1 {
+        return None;
+    }
+    // 6. Validate the alphabet: only ascii digits, '.', and a leading '-';
+    //    require at least one digit.
+    let mut saw_digit = false;
+    for (i, ch) in resolved.char_indices() {
+        match ch {
+            '0'..='9' => saw_digit = true,
+            '.' => {}
+            '-' if i == 0 => {}
+            _ => return None,
+        }
+    }
+    if !saw_digit {
+        return None;
+    }
+    // 7. Parse and require a finite value.
+    let v = resolved.parse::<f64>().ok()?;
+    if !v.is_finite() {
+        return None;
+    }
+    Some(v)
 }
 
 /// Build the canonical (engine-facing) string from chunks.
@@ -1585,5 +1712,73 @@ mod tests {
         let v = calc.current_value().unwrap();
         assert!(v.is_finite(), "memory must stay finite, got {v}");
         assert!((v / 1e308 - 1.0).abs() < 1e-9, "memory should remain 1e308, got {v}");
+    }
+
+    // ---- paste -------------------------------------------------------------
+
+    #[test]
+    fn paste_grouped_en_us() {
+        let mut calc = c();
+        calc.paste("1,234.5");
+        assert!((calc.current_value().unwrap() - 1234.5).abs() < 1e-9);
+        assert!(calc.display_expression().contains("1,234.5"));
+    }
+
+    #[test]
+    fn paste_negative() {
+        let mut calc = c();
+        calc.paste("-42");
+        assert_eq!(calc.display_expression(), "\u{2212}42");
+        assert!(calc.display_expression().starts_with('\u{2212}'));
+        assert!((calc.current_value().unwrap() + 42.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn paste_garbage_is_noop() {
+        let mut calc = c();
+        calc.paste("abc");
+        assert_eq!(calc.display_expression(), "");
+        assert_eq!(calc.state(), CalcState::Input);
+    }
+
+    #[test]
+    fn paste_empty_is_noop() {
+        let mut calc = c();
+        calc.paste("");
+        assert_eq!(calc.display_expression(), "");
+    }
+
+    #[test]
+    fn paste_es_grouping() {
+        // es locale: '.' grouping, ',' decimal.
+        let mut calc = c();
+        calc.paste("1.234,5");
+        assert!((calc.current_value().unwrap() - 1234.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn paste_trims_whitespace() {
+        let mut calc = c();
+        calc.paste("  12 ");
+        assert!((calc.current_value().unwrap() - 12.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn paste_number_only_no_expression() {
+        // Records the v1 NUMBER-only scope: a string containing an operator is
+        // rejected wholesale (the '+' is not in the sanitize alphabet), so we do
+        // NOT insert the leading "2" — the paste is a complete no-op.
+        let mut calc = c();
+        calc.paste("2+3");
+        assert_eq!(calc.display_expression(), "");
+    }
+
+    #[test]
+    fn paste_after_value_multiplies() {
+        // Implicit-multiply glue, mirroring insert_result.
+        let mut calc = c();
+        type_str(&mut calc, "2");
+        calc.paste("5");
+        assert_eq!(calc.current_value(), Some(10.0));
     }
 }

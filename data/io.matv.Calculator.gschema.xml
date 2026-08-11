@@ -98,5 +98,9 @@
       <default>"calculator"</default>
       <summary>The calculator-family mode to return to when leaving the converter</summary>
     </key>
+    <key name="haptic-feedback" type="b">
+      <default>false</default>
+      <summary>Whether to vibrate on keypad presses (device-specific)</summary>
+    </key>
   </schema>
 </schemalist>

@@ -28,6 +28,7 @@ const KEY_PROG_SIGNED: &str = "prog-signed";
 const KEY_LAST_CALC_MODE: &str = "last-calc-mode";
 const KEY_FIN_CALC: &str = "fin-calc";
 const KEY_DATE_FUNC: &str = "date-func";
+const KEY_HAPTIC_FEEDBACK: &str = "haptic-feedback";
 
 /// Open the settings store, or `None` when the schema isn't installed.
 ///
@@ -265,5 +266,19 @@ pub fn date_func() -> String {
 pub fn set_date_func(f: &str) {
     if let Some(s) = settings() {
         let _ = s.set_string(KEY_DATE_FUNC, f);
+    }
+}
+
+/// Whether keypad presses trigger haptic feedback, defaulting to off.
+///
+/// Device-specific: only takes effect where a force-feedback node exists.
+pub fn haptic_feedback() -> bool {
+    settings().map(|s| s.boolean(KEY_HAPTIC_FEEDBACK)).unwrap_or(false)
+}
+
+/// Persist the haptic-feedback flag (best-effort).
+pub fn set_haptic_feedback(v: bool) {
+    if let Some(s) = settings() {
+        let _ = s.set_boolean(KEY_HAPTIC_FEEDBACK, v);
     }
 }
