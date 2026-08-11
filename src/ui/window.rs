@@ -1731,19 +1731,21 @@ fn show_history(ui: &Ui) {
                 .css_classes(["flat", "circular"])
                 .build();
             let entry_btn = entry.clone();
-            let group_btn = group.clone().expect("day-group exists");
+            let group_btn_ref = group.clone().expect("day-group exists");
             del_btn.connect_clicked(clone!(
                 #[weak]
                 ui,
                 #[weak]
                 row,
                 #[weak]
+                group_btn_ref,
+                #[weak]
                 content,
                 #[weak]
                 clear_btn,
                 #[upgrade_or_default]
                 move |_| {
-                    delete_in_place(&ui, &entry_btn, &row, &group_btn, &content, &clear_btn);
+                    delete_in_place(&ui, &entry_btn, &row, &group_btn_ref, &content, &clear_btn);
                 }
             ));
             row.add_suffix(&del_btn);
@@ -1765,13 +1767,15 @@ fn show_history(ui: &Ui) {
             // row. Default (bubble) phase so tap-to-insert and vertical scroll
             // still win for non-flick gestures.
             let entry_swipe = entry.clone();
-            let group_swipe = group.clone().expect("day-group exists");
+            let group_swipe_ref = group.clone().expect("day-group exists");
             let swipe = gtk::GestureSwipe::new();
             swipe.connect_swipe(clone!(
                 #[weak]
                 ui,
                 #[weak]
                 row,
+                #[weak]
+                group_swipe_ref,
                 #[weak]
                 content,
                 #[weak]
@@ -1781,7 +1785,7 @@ fn show_history(ui: &Ui) {
                     // Leftward, horizontal-dominant flick with enough speed → delete.
                     // NOTE: the velocity threshold (-400.0) is on-device tunable.
                     if velocity_x < -400.0 && velocity_x.abs() > velocity_y.abs() {
-                        delete_in_place(&ui, &entry_swipe, &row, &group_swipe, &content, &clear_btn);
+                        delete_in_place(&ui, &entry_swipe, &row, &group_swipe_ref, &content, &clear_btn);
                     }
                 }
             ));
