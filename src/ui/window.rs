@@ -1985,9 +1985,8 @@ fn present_about(window: &adw::ApplicationWindow) {
         .developer_name("Daniel Miller")
         .license_type(gtk::License::Gpl30)
         .comments(
-            "A native GTK4/libadwaita calculator — Google Calculator-style, \
-             mobile-first for GNOME Shell Mobile, adapting to your theme and \
-             accent color.",
+            "A native GTK4/libadwaita calculator, mobile-first for GNOME \
+             Shell Mobile, adapting to your theme and accent color.",
         )
         .build();
     about.present(Some(window));

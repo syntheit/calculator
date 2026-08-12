@@ -11,7 +11,7 @@ use gtk::gdk;
 /// The app stylesheet. libadwaita *named* colors (`@accent_color`,
 /// `@window_fg_color`, `@error_color`, …) are used throughout
 /// so every surface follows the system light/dark theme AND the user's accent
-/// color automatically — this is what replaces Google Calculator's fixed
+/// color automatically, so the calculator is not tied to a fixed
 /// purple/pink palette.
 pub const APP_CSS: &str = "
 /* ─── Display ──────────────────────────────────────────────────────────── */
@@ -62,14 +62,13 @@ pub const APP_CSS: &str = "
     min-height: 62px;
     border-radius: 9999px;   /* circular */
     padding: 0;
-    transition: background-color 100ms ease, box-shadow 100ms ease, filter 100ms ease;
+    transition: background-color 100ms ease, filter 100ms ease;
 }
 
-/* Pressed-key feedback (Google-Calculator style). NOTE: :active is the
+/* Pressed-key feedback. NOTE: :active is the
    PRESSED pseudo-class — distinct from the .calc-active toggle CLASS. */
 .calc-btn:active {
-    box-shadow: inset 0 0 0 100px alpha(@window_fg_color, 0.12);
-    filter: brightness(0.94);
+    filter: brightness(0.90);
 }
 
 /* Programmer keypad keys: shorter than the 62px basic keys so all 7 rows
@@ -91,7 +90,7 @@ pub const APP_CSS: &str = "
     font-weight: 600;
 }
 
-/* AC / clear: a stronger accent highlight (Google's blue AC). */
+/* AC / clear: a stronger accent highlight. */
 .calc-clear {
     background-color: alpha(@accent_bg_color, 0.28);
     color: @accent_color;
@@ -129,13 +128,12 @@ pub const APP_CSS: &str = "
     min-height: 38px;
     border-radius: 9999px;   /* stadium */
     padding: 0 6px;
-    transition: background-color 100ms ease, box-shadow 100ms ease, filter 100ms ease;
+    transition: background-color 100ms ease, filter 100ms ease;
 }
 
 /* Pressed-key feedback for the pill scientific keys. */
 .calc-sci:active {
-    box-shadow: inset 0 0 0 100px alpha(@window_fg_color, 0.12);
-    filter: brightness(0.94);
+    filter: brightness(0.90);
 }
 
 /* The chevron handle that reveals the scientific pad. */

@@ -1,4 +1,4 @@
-//! Calculator — a native GTK4/libadwaita calculator, Google Calculator-style,
+//! Calculator, a native GTK4/libadwaita calculator that is
 //! mobile-first for GNOME Shell Mobile (aarch64) and scaling to the desktop.
 //!
 //! Application entry point: initialises logging and libadwaita, installs the
