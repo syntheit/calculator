@@ -62,13 +62,13 @@ pub const APP_CSS: &str = "
     min-height: 62px;
     border-radius: 9999px;   /* circular */
     padding: 0;
-    transition: background-color 100ms ease, filter 100ms ease;
+    transition: background-color 100ms ease, background-image 100ms ease, filter 100ms ease;
 }
 
 /* Pressed-key feedback. NOTE: :active is the
    PRESSED pseudo-class — distinct from the .calc-active toggle CLASS. */
 .calc-btn:active {
-    filter: brightness(0.90);
+    background-image: linear-gradient(alpha(@window_fg_color, 0.14), alpha(@window_fg_color, 0.14));
 }
 
 /* Programmer keypad keys: shorter than the 62px basic keys so all 7 rows
@@ -128,12 +128,12 @@ pub const APP_CSS: &str = "
     min-height: 38px;
     border-radius: 9999px;   /* stadium */
     padding: 0 6px;
-    transition: background-color 100ms ease, filter 100ms ease;
+    transition: background-color 100ms ease, background-image 100ms ease, filter 100ms ease;
 }
 
 /* Pressed-key feedback for the pill scientific keys. */
 .calc-sci:active {
-    filter: brightness(0.90);
+    background-image: linear-gradient(alpha(@window_fg_color, 0.14), alpha(@window_fg_color, 0.14));
 }
 
 /* The chevron handle that reveals the scientific pad. */
